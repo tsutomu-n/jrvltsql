@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Iterator, Optional
 
 from src.jvlink.constants import JV_READ_NO_MORE_DATA, JV_READ_SUCCESS
+from src.jvlink.error_codes import describe_jvlink_error
 from src.jvlink.wrapper import JVLinkWrapper
 from src.parser.factory import ParserFactory
 from src.utils.logger import get_logger
@@ -20,7 +21,24 @@ logger = get_logger(__name__)
 class FetcherError(Exception):
     """Data fetcher error."""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: Optional[int] = None,
+        api: Optional[str] = None,
+        category: Optional[str] = None,
+        stable_error: Optional[str] = None,
+        retryable: bool = False,
+        terminal: bool = False,
+    ):
+        self.error_code = error_code
+        self.api = api
+        self.category = category
+        self.stable_error = stable_error
+        self.retryable = retryable
+        self.terminal = terminal
+        super().__init__(message)
 
 
 class BaseFetcher(ABC):
@@ -228,30 +246,23 @@ class BaseFetcher(ABC):
                         last_update_time = current_time
 
                 elif ret_code in (-201, -202, -203, -402, -403, -502, -503):
-                    # Recoverable errors - delete corrupted file and continue
-                    #
-                    # Official meanings (JV-Link "3. コード表", JVRead/JVGets
-                    # section) differ from the original kmy-keiba-derived
-                    # labels below:
-                    # -201: JVInit not called (not "database busy")
-                    # -202: previous JVOpen/JVRTOpen/JVMVOpen not JVClose'd (not "file busy")
-                    # -203: JVOpen not called (not "setup not complete or file corruption")
-                    # -402, -403: downloaded file abnormal -- size 0 / bad content (file, not database)
-                    # -502: download failed (communication/disk error)
-                    # -503: file not found
-                    #
-                    # -201/-203 in particular indicate a call-order bug (JVInit/
-                    # JVOpen genuinely not called), which deleting a file and
-                    # retrying jv_read() cannot fix -- retrying will just hit
-                    # the same code again. They remain in this recoverable set
-                    # unchanged pending a decision on whether that's still the
-                    # right classification; see the PR description.
+                    descriptor = describe_jvlink_error("JVRead", ret_code)
+                    if not descriptor.retryable:
+                        raise FetcherError(
+                            (
+                                f"JVRead failed [{descriptor.stable_error}] "
+                                f"(code: {ret_code}, {descriptor.message})"
+                            ),
+                            error_code=ret_code,
+                            api="JVRead",
+                            category=descriptor.category,
+                            stable_error=descriptor.stable_error,
+                            retryable=False,
+                            terminal=descriptor.terminal,
+                        )
 
                     # Error-specific guidance
                     error_messages = {
-                        -201: "JVInitが行なわれていません（内部エラー）。一時的なエラーとして続行します。",
-                        -202: "前回のOpenがJVCloseされていません（オープン中）。一時的なエラーとして続行します。",
-                        -203: "JVOpenが行なわれていません（内部エラー）。ファイルを削除して続行します。",
                         -402: "ダウンロードしたファイルが異常です（サイズ0）。破損ファイルを削除して続行します。",
                         -403: "ダウンロードしたファイルが異常です（データ内容）。破損ファイルを削除して続行します。",
                         -502: "ダウンロードに失敗しました（通信エラーやディスクエラーなど）。破損ファイルを削除して続行します。",

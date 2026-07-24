@@ -14,8 +14,8 @@ from src.jvlink.constants import (
     JV_READ_SUCCESS,
     JV_RT_ERROR,
     JV_RT_SUCCESS,
-    get_error_message,
 )
+from src.jvlink.error_codes import describe_jvlink_error
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -56,7 +56,13 @@ CP1252_TO_BYTE = {
 class JVLinkError(Exception):
     """JV-Link related error."""
 
-    def __init__(self, message: str, error_code: Optional[int] = None):
+    def __init__(
+        self,
+        message: str,
+        error_code: Optional[int] = None,
+        *,
+        api: Optional[str] = None,
+    ):
         """Initialize JVLinkError.
 
         Args:
@@ -64,8 +70,23 @@ class JVLinkError(Exception):
             error_code: JV-Link error code
         """
         self.error_code = error_code
-        if error_code is not None:
-            message = f"{message} (code: {error_code}, {get_error_message(error_code)})"
+        self.api = api
+        self.category: Optional[str] = None
+        self.stable_error: Optional[str] = None
+        self.retryable = False
+        self.terminal = False
+        if error_code is not None and api is not None:
+            descriptor = describe_jvlink_error(api, error_code)
+            self.category = descriptor.category
+            self.stable_error = descriptor.stable_error
+            self.retryable = descriptor.retryable
+            self.terminal = descriptor.terminal
+            message = (
+                f"{message} [{descriptor.stable_error}] "
+                f"(code: {error_code}, {descriptor.message})"
+            )
+        elif error_code is not None:
+            message = f"{message} (code: {error_code})"
         super().__init__(message)
 
 
@@ -205,7 +226,11 @@ class JVLinkWrapper:
                 logger.info("JV-Link initialized successfully", sid=self.sid)
             else:
                 logger.error("JV-Link initialization failed", error_code=result, sid=self.sid)
-                raise JVLinkError("JV-Link initialization failed", error_code=result)
+                raise JVLinkError(
+                    "JV-Link initialization failed",
+                    error_code=result,
+                    api="JVInit",
+                )
             return result
         except Exception as e:
             if isinstance(e, JVLinkError):
@@ -270,10 +295,9 @@ class JVLinkWrapper:
             # errors start at -111):
             # 0 (JV_RT_SUCCESS): Success with data
             # -1: No data available (NOT an error - normal when no new data)
-            # -2: No data available (alternative code)
-            # <= -111: Actual errors (e.g., -111=dataspec invalid, -301=auth error, etc.)
-            if result < -2:
-                # Real errors are -111 or below (see comment above)
+            # -2: Setup dialog cancelled (terminal, not no-data)
+            # Other negative values: API-specific errors
+            if result < 0 and result != -1:
                 logger.error(
                     "JVOpen failed",
                     data_spec=data_spec,
@@ -281,9 +305,12 @@ class JVLinkWrapper:
                     option=option,
                     error_code=result,
                 )
-                raise JVLinkError("JVOpen failed", error_code=result)
-            elif result in (-1, -2):
-                # -1 and -2 both mean "no data available" - NOT an error
+                raise JVLinkError(
+                    "JVOpen failed",
+                    error_code=result,
+                    api="JVOpen",
+                )
+            elif result == -1:
                 logger.info(
                     "JVOpen: No data available",
                     data_spec=data_spec,
@@ -353,10 +380,18 @@ class JVLinkWrapper:
                 # -114: 契約外データ種別（警告レベル、ユーザーには問題なし）
                 elif result == -114:
                     logger.debug("JVRTOpen: data spec not subscribed", data_spec=data_spec, error_code=result)
-                    raise JVLinkError("JVRTOpen failed", error_code=result)
+                    raise JVLinkError(
+                        "JVRTOpen failed",
+                        error_code=result,
+                        api="JVRTOpen",
+                    )
                 else:
                     logger.error("JVRTOpen failed", data_spec=data_spec, error_code=result)
-                    raise JVLinkError("JVRTOpen failed", error_code=result)
+                    raise JVLinkError(
+                        "JVRTOpen failed",
+                        error_code=result,
+                        api="JVRTOpen",
+                    )
 
             self._is_open = True
 
@@ -510,7 +545,7 @@ class JVLinkWrapper:
             else:
                 # Error (< -1)
                 logger.error("JVRead failed", error_code=result)
-                raise JVLinkError("JVRead failed", error_code=result)
+                raise JVLinkError("JVRead failed", error_code=result, api="JVRead")
 
         except Exception as e:
             if isinstance(e, JVLinkError):
@@ -626,7 +661,7 @@ class JVLinkWrapper:
             else:
                 # Error (< -1)
                 logger.error("JVGets failed", error_code=result)
-                raise JVLinkError("JVGets failed", error_code=result)
+                raise JVLinkError("JVGets failed", error_code=result, api="JVGets")
 
         except Exception as e:
             if isinstance(e, JVLinkError):

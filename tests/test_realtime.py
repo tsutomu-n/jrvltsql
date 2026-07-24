@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from src.fetcher.base import FetcherError
 from src.fetcher.realtime import RealtimeFetcher, materialize_complete_records
 from src.services.realtime_monitor import RealtimeMonitor, MonitorStatus
 from src.realtime.updater import RealtimeUpdater, summarize_update_result
@@ -209,7 +210,7 @@ def test_materialize_complete_records_rejects_recoverable_read_loss():
         )
 
 
-def test_realtime_fetcher_tracks_recoverable_read_loss():
+def test_realtime_fetcher_stops_on_jvread_open_not_called():
     fetcher = RealtimeFetcher.__new__(RealtimeFetcher)
     fetcher.reset_statistics()
     fetcher._files_processed = 0
@@ -222,9 +223,15 @@ def test_realtime_fetcher_tracks_recoverable_read_loss():
         (0, None, None),
     ]
 
-    assert list(fetcher._fetch_and_parse()) == []
-    assert fetcher.get_statistics()["recoverable_read_errors"] == 1
-    fetcher.jvlink.jv_file_delete.assert_called_once_with("corrupt.jvd")
+    with pytest.raises(FetcherError) as exc_info:
+        list(fetcher._fetch_and_parse())
+
+    assert exc_info.value.stable_error == "jvread_open_not_called"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.terminal is True
+    assert fetcher.jvlink.jv_read.call_count == 1
+    assert fetcher.get_statistics()["recoverable_read_errors"] == 0
+    fetcher.jvlink.jv_file_delete.assert_not_called()
 
 
 def test_process_parsed_record_preserves_failed_expanded_rows():

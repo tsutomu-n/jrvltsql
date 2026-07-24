@@ -20,6 +20,7 @@ from src.jvlink.constants import (
     JV_READ_SUCCESS,
     BUFFER_SIZE_JVREAD,
 )
+from src.jvlink.error_codes import describe_jvlink_error
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -57,9 +58,30 @@ def find_bridge_executable() -> Optional[Path]:
 class JVLinkBridgeError(Exception):
     """JV-Link Bridge related error."""
 
-    def __init__(self, message: str, error_code: Optional[int] = None):
+    def __init__(
+        self,
+        message: str,
+        error_code: Optional[int] = None,
+        *,
+        api: Optional[str] = None,
+    ):
         self.error_code = error_code
-        if error_code is not None:
+        self.api = api
+        self.category: Optional[str] = None
+        self.stable_error: Optional[str] = None
+        self.retryable = False
+        self.terminal = False
+        if error_code is not None and api is not None:
+            descriptor = describe_jvlink_error(api, error_code)
+            self.category = descriptor.category
+            self.stable_error = descriptor.stable_error
+            self.retryable = descriptor.retryable
+            self.terminal = descriptor.terminal
+            message = (
+                f"{message} [{descriptor.stable_error}] "
+                f"(code: {error_code}, {descriptor.message})"
+            )
+        elif error_code is not None:
             message = f"{message} (code: {error_code})"
         super().__init__(message)
 
@@ -202,7 +224,11 @@ class JVLinkBridge:
 
         if response.get("status") == "error":
             code = response.get("code", -1)
-            raise JVLinkBridgeError(response.get("error", "JVInit failed"), error_code=code)
+            raise JVLinkBridgeError(
+                response.get("error", "JVInit failed"),
+                error_code=code,
+                api="JVInit",
+            )
 
         logger.info("JV-Link initialized via bridge", hwnd=response.get("hwnd"))
         return 0
@@ -231,8 +257,8 @@ class JVLinkBridge:
         download_count = response.get("downloadcount", 0)
         last_ts = response.get("lastfiletimestamp", "")
 
-        if code < -2:
-            raise JVLinkBridgeError("JVOpen failed", error_code=code)
+        if code < 0 and code != -1:
+            raise JVLinkBridgeError("JVOpen failed", error_code=code, api="JVOpen")
 
         self._is_open = True
         logger.info("JVOpen via bridge", data_spec=data_spec, read_count=read_count, download_count=download_count)
@@ -247,8 +273,12 @@ class JVLinkBridge:
         code = response.get("code", -1)
         read_count = response.get("readcount", 0)
 
-        if code < -2:
-            raise JVLinkBridgeError("JVRTOpen failed", error_code=code)
+        if code < 0 and code != -1:
+            raise JVLinkBridgeError(
+                "JVRTOpen failed",
+                error_code=code,
+                api="JVRTOpen",
+            )
 
         self._is_open = True
         return code, read_count

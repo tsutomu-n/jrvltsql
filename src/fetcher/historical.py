@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Iterator, Optional
 
 from src.fetcher.base import BaseFetcher, FetcherError
+from src.jvlink.error_codes import describe_jvlink_error
 from src.utils.logger import get_logger
 from src.utils.progress import JVLinkProgressDisplay
 
@@ -226,7 +227,15 @@ class HistoricalFetcher(BaseFetcher):
             logger.error("Failed to fetch historical data", error=str(e))
             if self.progress_display:
                 self.progress_display.print_error(f"エラー: {str(e)}")
-            raise FetcherError(f"Historical fetch failed: {e}")
+            raise FetcherError(
+                f"Historical fetch failed: {e}",
+                error_code=getattr(e, "error_code", None),
+                api=getattr(e, "api", None),
+                category=getattr(e, "category", None),
+                stable_error=getattr(e, "stable_error", None),
+                retryable=bool(getattr(e, "retryable", False)),
+                terminal=bool(getattr(e, "terminal", False)),
+            ) from e
 
         finally:
             # Close stream (JVClose) — releases the current open session so
@@ -366,25 +375,6 @@ class HistoricalFetcher(BaseFetcher):
         last_progress_time = start_time  # Track when downloaded-file count last changed.
         stall_timeout = 300.0  # 5 minutes before stall abort
 
-        # Retryable error codes (temporary errors that may resolve)
-        #
-        # Official meanings (JV-Link "3. コード表", JVStatus section) differ
-        # from the labels below:
-        # -201: JVInit not called (not "database busy")
-        # -202: previous JVOpen/JVRTOpen/JVMVOpen not JVClose'd (not "file busy")
-        # -203: JVOpen not called (not "incomplete setup/cache issue")
-        # -502: download failed (communication/disk error)
-        # -503: (JVStatus doesn't define -503; kept here for the bounded
-        #        max_retries=2 safety net below in case JVRead's -503,
-        #        file not found, surfaces through this status poll)
-        #
-        # -201/-203 indicate a call-order bug (JVInit/JVOpen genuinely not
-        # called), which polling jv_status() again cannot fix -- it will keep
-        # returning the same code. They remain in this retryable set
-        # unchanged (bounded by max_retries=2 below) pending a decision on
-        # whether that's still the right classification.
-        retryable_errors = {-201, -202, -203, -502, -503}
-
         while True:
             # Check if timeout exceeded
             elapsed = time.time() - start_time
@@ -456,7 +446,8 @@ class HistoricalFetcher(BaseFetcher):
                             )
 
                 if status < 0:
-                    if status in retryable_errors:
+                    descriptor = describe_jvlink_error("JVStatus", status)
+                    if descriptor.retryable:
                         retry_count += 1
                         if retry_count <= max_retries:
                             logger.warning(
@@ -469,10 +460,30 @@ class HistoricalFetcher(BaseFetcher):
                             continue
                         else:
                             raise FetcherError(
-                                f"Download failed after {max_retries} retries with status code: {status}"
+                                (
+                                    f"Download failed [{descriptor.stable_error}] "
+                                    f"after {max_retries} retries with status code: {status}"
+                                ),
+                                error_code=status,
+                                api="JVStatus",
+                                category=descriptor.category,
+                                stable_error=descriptor.stable_error,
+                                retryable=True,
+                                terminal=descriptor.terminal,
                             )
                     else:
-                        raise FetcherError(f"Download failed with status code: {status}")
+                        raise FetcherError(
+                            (
+                                f"Download failed [{descriptor.stable_error}] "
+                                f"with status code: {status}"
+                            ),
+                            error_code=status,
+                            api="JVStatus",
+                            category=descriptor.category,
+                            stable_error=descriptor.stable_error,
+                            retryable=False,
+                            terminal=descriptor.terminal,
+                        )
 
                 # Wait before next status check
                 time.sleep(interval)

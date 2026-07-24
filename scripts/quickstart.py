@@ -1928,6 +1928,7 @@ class QuickstartRunner:
         self.project_root = Path(__file__).parent.parent
         self.errors = []
         self.warnings = []
+        self.spec_results = {}
         self.stats = {
             'specs_success': 0,
             'specs_nodata': 0,      # データなし（正常）
@@ -2498,6 +2499,7 @@ class QuickstartRunner:
 
     def _run_fetch_all_rich(self) -> bool:
         """データ取得（Rich UI）- チェックボックス形式の進捗表示"""
+        self.spec_results = {}
         specs_to_fetch = self._get_specs_for_mode()
 
         historical_specs = len(specs_to_fetch)
@@ -2523,9 +2525,15 @@ class QuickstartRunner:
 
         # 各スペックを処理して結果を表示
         results = []
+        terminal_failure = False
         for idx, (spec, description, option) in enumerate(specs_to_fetch, 1):
             start_time = time.time()
             status, details = self._fetch_single_spec_with_progress(spec, option)
+            self.spec_results[spec] = {
+                "status": status,
+                "error_type": details.get("error_type"),
+                "stable_error": details.get("stable_error"),
+            }
             elapsed = time.time() - start_time
 
             if status == "success":
@@ -2552,6 +2560,16 @@ class QuickstartRunner:
                     error_type = details.get('error_type', 'unknown')
                     error_label = self._get_error_label(error_type)
                     results.append(f"      [red]原因:[/red] [{error_label}] {details['error_message']}")
+                if details.get("terminal"):
+                    terminal_failure = True
+                    for remaining_spec, _, _ in specs_to_fetch[idx:]:
+                        spec_status[remaining_spec] = "not_run"
+                        self.spec_results[remaining_spec] = {
+                            "status": "not_run",
+                            "error_type": "not_run_due_to_terminal_error",
+                            "stable_error": details.get("stable_error"),
+                        }
+                    break
 
         # 更新されたチェックボックス一覧を表示
         console.print()
@@ -2563,6 +2581,13 @@ class QuickstartRunner:
         for result in results:
             console.print(result)
 
+        if terminal_failure:
+            return False
+        if self.settings.get("mode") == "update":
+            return all(
+                result["status"] in ("success", "nodata")
+                for result in self.spec_results.values()
+            ) and len(self.spec_results) == len(specs_to_fetch)
         return (
             self.stats['specs_failed'] == 0
             and (self.stats['specs_success'] + self.stats['specs_nodata']) > 0
@@ -2760,13 +2785,20 @@ class QuickstartRunner:
 
     def _run_fetch_all_simple(self) -> bool:
         """データ取得（シンプル版）"""
+        self.spec_results = {}
         specs = self._get_specs_for_mode()
 
         total = len(specs)
+        terminal_failure = False
         for idx, (spec, desc, option) in enumerate(specs, 1):
             print(f"  [{idx}/{total}] {spec}: {desc}...", end=" ", flush=True)
 
-            status = self._fetch_single_spec(spec, option)
+            status, details = self._fetch_single_spec_with_progress(spec, option)
+            self.spec_results[spec] = {
+                "status": status,
+                "error_type": details.get("error_type"),
+                "stable_error": details.get("stable_error"),
+            }
 
             if status == "success":
                 self.stats['specs_success'] += 1
@@ -2780,10 +2812,26 @@ class QuickstartRunner:
             else:
                 self.stats['specs_failed'] += 1
                 print("NG")
+                if details.get("terminal"):
+                    terminal_failure = True
+                    for remaining_spec, _, _ in specs[idx:]:
+                        self.spec_results[remaining_spec] = {
+                            "status": "not_run",
+                            "error_type": "not_run_due_to_terminal_error",
+                            "stable_error": details.get("stable_error"),
+                        }
+                    break
 
             time.sleep(0.5)
 
         print(f"\n  取得成功: {self.stats['specs_success']}, データなし: {self.stats['specs_nodata']}, 契約外: {self.stats['specs_skipped']}, エラー: {self.stats['specs_failed']}")
+        if terminal_failure:
+            return False
+        if self.settings.get("mode") == "update":
+            return all(
+                result["status"] in ("success", "nodata")
+                for result in self.spec_results.values()
+            ) and len(self.spec_results) == len(specs)
         return (
             self.stats['specs_failed'] == 0
             and (self.stats['specs_success'] + self.stats['specs_nodata']) > 0
@@ -3125,6 +3173,7 @@ class QuickstartRunner:
     # エラータイプの日本語ラベル
     ERROR_TYPE_LABELS = {
         'auth': 'JV-Link認証エラー',
+        'auth_expired': 'JV-Link利用キー期限切れ',
         'connection': '接続エラー',
         'contract': '契約外',
         'timeout': 'タイムアウト',
@@ -3271,6 +3320,8 @@ class QuickstartRunner:
             'total_files': 0,
             'error_type': None,
             'error_message': None,
+            'stable_error': None,
+            'terminal': False,
         }
 
         # 日付範囲の検証
@@ -3372,6 +3423,9 @@ class QuickstartRunner:
             error_code = getattr(e, 'error_code', None)
             error_str = str(e)
 
+            details['stable_error'] = getattr(e, 'stable_error', None)
+            details['terminal'] = bool(getattr(e, 'terminal', False))
+
             # エラーコード別の判定
             if _is_subscription_error(e):
                 details['error_type'] = 'contract'
@@ -3382,15 +3436,24 @@ class QuickstartRunner:
                     details['error_message'] = 'データ提供サービス契約外です'
                 self.warnings.append(f"{spec}: {details['error_message']}")
                 return ("skipped", details)
-            elif error_code in (-100, -101, -102, -103):
+            elif getattr(e, 'category', None) == 'auth_expired':
+                details['error_type'] = 'auth_expired'
+                details['error_message'] = (
+                    f"[{details['stable_error']}] JV-Link認証エラー: {error_str}"
+                )
+            elif getattr(e, 'category', '').startswith('auth_'):
                 details['error_type'] = 'auth'
-                details['error_message'] = f'JV-Link認証エラー: {error_str}'
-            elif error_code == -2:
-                # No data available
-                return ("nodata", details)
+                details['error_message'] = (
+                    f"[{details['stable_error']}] JV-Link認証エラー: {error_str}"
+                )
             else:
                 details['error_type'] = 'connection'
-                details['error_message'] = f'JV-Linkエラー: {error_str}'
+                stable_prefix = (
+                    f"[{details['stable_error']}] "
+                    if details['stable_error']
+                    else ""
+                )
+                details['error_message'] = f'{stable_prefix}JV-Linkエラー: {error_str}'
 
             self.errors.append({
                 'spec': spec,
@@ -3401,14 +3464,26 @@ class QuickstartRunner:
 
         except FetcherError as e:
             error_str = str(e)
+            details['stable_error'] = getattr(e, 'stable_error', None)
+            details['terminal'] = bool(getattr(e, 'terminal', False))
 
             # FetcherError の内容からエラー種別を判定
-            if _is_subscription_error(e):
+            if getattr(e, 'category', None) == 'auth_expired':
+                details['error_type'] = 'auth_expired'
+                details['error_message'] = (
+                    f"[{details['stable_error']}] JV-Link認証エラー: {error_str}"
+                )
+            elif getattr(e, 'category', '').startswith('auth_'):
+                details['error_type'] = 'auth'
+                details['error_message'] = (
+                    f"[{details['stable_error']}] JV-Link認証エラー: {error_str}"
+                )
+            elif _is_subscription_error(e):
                 details['error_type'] = 'contract'
                 details['error_message'] = 'データ提供サービス契約外です'
                 self.warnings.append(f"{spec}: {details['error_message']}")
                 return ("skipped", details)
-            if _is_historical_no_data_error(e):
+            elif _is_historical_no_data_error(e):
                 return ("nodata", details)
             else:
                 details['error_type'] = 'fetch'
