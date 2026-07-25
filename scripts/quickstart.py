@@ -3416,6 +3416,8 @@ class QuickstartRunner:
                     batch_size=1000,
                     service_key=config.get("jvlink.service_key"),
                     show_progress=True,
+                    download_timeout=self.settings.get("download_timeout", 600.0),
+                    stall_timeout=self.settings.get("stall_timeout", 300.0),
                 )
 
                 # データ取得実行
@@ -3638,6 +3640,10 @@ def main():
                         help="バックグラウンド監視を無効化")
     parser.add_argument("--log-file", type=str, default=None,
                         help="ログファイルパス（指定するとログ出力有効。デフォルト: 無効）")
+    parser.add_argument("--download-timeout", type=float, default=600.0,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--stall-timeout", type=float, default=300.0,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--result-json", type=str, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--source", type=str, choices=["jra"], default="jra",
@@ -3645,6 +3651,12 @@ def main():
 
     args = parser.parse_args()
 
+    if args.download_timeout <= 0:
+        parser.error("--download-timeout must be greater than zero")
+    if args.stall_timeout <= 0 or args.stall_timeout >= args.download_timeout:
+        parser.error(
+            "--stall-timeout must be greater than zero and less than --download-timeout"
+        )
     if args.result_json and Path(args.result_json).resolve().exists():
         parser.error("--result-json destination must not already exist")
 
@@ -3684,6 +3696,8 @@ def main():
             settings['from_date'] = "19860101"  # デフォルト: 全期間
 
         settings['to_date'] = args.to_date if args.to_date else today.strftime("%Y%m%d")
+        settings['download_timeout'] = args.download_timeout
+        settings['stall_timeout'] = args.stall_timeout
 
         # モード設定（デフォルトは簡易）
         mode = args.mode or 'simple'

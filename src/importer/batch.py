@@ -47,6 +47,8 @@ class BatchProcessor:
         service_key: Optional[str] = None,
         show_progress: bool = True,
         cache_manager=None,
+        download_timeout: float = 600.0,
+        stall_timeout: float = 300.0,
     ):
         """Initialize batch processor.
 
@@ -58,11 +60,15 @@ class BatchProcessor:
                         programmatically without requiring registry configuration.
             show_progress: Show stylish progress display (default: True)
             cache_manager: Optional CacheManager for local file cache read/write
+            download_timeout: Maximum JV-Link download wait in seconds
+            stall_timeout: Maximum wait without download progress in seconds
         """
         self.fetcher = HistoricalFetcher(
             sid,
             service_key=service_key,
             show_progress=show_progress,
+            download_timeout=download_timeout,
+            stall_timeout=stall_timeout,
         )
         self.importer = DataImporter(database, batch_size)
         self.database = database

@@ -11,6 +11,27 @@ from src.database.schema import SCHEMAS
 from src.database.sqlite_handler import SQLiteDatabase
 
 
+def test_batch_processor_propagates_download_timeouts(monkeypatch):
+    captured: dict = {}
+
+    class FakeHistoricalFetcher:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("src.importer.batch.HistoricalFetcher", FakeHistoricalFetcher)
+    database = MagicMock()
+
+    processor = BatchProcessor(
+        database,
+        download_timeout=601,
+        stall_timeout=299,
+    )
+
+    assert processor.fetcher is not None
+    assert captured["download_timeout"] == 601
+    assert captured["stall_timeout"] == 299
+
+
 def test_option_3_setup_range_splits_long_periods():
     assert BatchProcessor._should_split_setup_range("20200101", "20220101", 3) is True
 

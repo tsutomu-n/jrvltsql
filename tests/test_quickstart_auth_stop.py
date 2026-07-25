@@ -220,6 +220,105 @@ def test_main_writes_bounded_result_for_runner_outcome(
     )
 
 
+def test_main_accepts_and_propagates_download_timeouts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_path = tmp_path / "result.json"
+    captured_settings: dict = {}
+
+    class FakeLock:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class FakeRunner:
+        def __init__(self, settings: dict) -> None:
+            captured_settings.update(settings)
+            self.spec_results = {
+                name: {"status": "nodata", "stable_error": None}
+                for name in quickstart.BOUNDED_UPDATE_SPEC_NAMES
+            }
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(quickstart, "_check_service_key", lambda: (True, "fixture"))
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--from-date",
+            "20260711",
+            "--to-date",
+            "20260725",
+            "--download-timeout",
+            "601",
+            "--stall-timeout",
+            "299",
+            "--result-json",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 0
+    assert captured_settings["download_timeout"] == 601.0
+    assert captured_settings["stall_timeout"] == 299.0
+
+
+@pytest.mark.parametrize(
+    ("download_timeout", "stall_timeout"),
+    [("0", "1"), ("600", "0"), ("600", "600"), ("600", "601")],
+)
+def test_main_rejects_invalid_download_timeouts_before_runner(
+    download_timeout,
+    stall_timeout,
+    monkeypatch,
+) -> None:
+    runner_started = False
+
+    class FakeRunner:
+        def __init__(self, _: dict) -> None:
+            nonlocal runner_started
+            runner_started = True
+
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--download-timeout",
+            download_timeout,
+            "--stall-timeout",
+            stall_timeout,
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 2
+    assert runner_started is False
+
+
 def test_main_writes_bounded_result_when_runner_raises(
     tmp_path,
     monkeypatch,

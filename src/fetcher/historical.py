@@ -45,9 +45,24 @@ class HistoricalFetcher(BaseFetcher):
         ...     print(record['headRecordSpec'])
     """
 
-    def __init__(self, sid: str = "UNKNOWN", service_key: Optional[str] = None, show_progress: bool = True):
+    def __init__(
+        self,
+        sid: str = "UNKNOWN",
+        service_key: Optional[str] = None,
+        show_progress: bool = True,
+        download_timeout: float = 600.0,
+        stall_timeout: float = 300.0,
+    ):
+        if download_timeout <= 0:
+            raise ValueError("download_timeout must be greater than zero")
+        if stall_timeout <= 0 or stall_timeout >= download_timeout:
+            raise ValueError(
+                "stall_timeout must be greater than zero and less than download_timeout"
+            )
         super().__init__(sid, service_key=service_key, show_progress=show_progress)
         self.cache_manager = None
+        self.download_timeout = float(download_timeout)
+        self.stall_timeout = float(stall_timeout)
 
     def fetch(
         self,
@@ -180,7 +195,12 @@ class HistoricalFetcher(BaseFetcher):
                         f"{data_spec} ダウンロード",
                         total=download_count,
                     )
-                self._wait_for_download(download_task_id, download_count=download_count)
+                self._wait_for_download(
+                    download_task_id,
+                    download_count=download_count,
+                    timeout=self.download_timeout,
+                    stall_timeout=self.stall_timeout,
+                )
 
             # Set total files after JVOpen reports the stream size.
             self._total_files = read_count
@@ -351,7 +371,8 @@ class HistoricalFetcher(BaseFetcher):
         download_task_id: Optional[int] = None,
         *,
         download_count: int,
-        timeout: int = 600,
+        timeout: float = 600.0,
+        stall_timeout: float = 300.0,
         interval: float = 0.08,
     ):
         """Wait for JV-Link download to complete.
@@ -359,6 +380,8 @@ class HistoricalFetcher(BaseFetcher):
         Args:
             download_task_id: Progress task ID for download (optional)
             timeout: Maximum wait time in seconds (default: 600 = 10 minutes).
+            stall_timeout: Maximum time without download progress in seconds
+                           (default: 300 = 5 minutes).
             interval: Status check interval in seconds (default: 0.08).
                      kmy-keiba uses 80ms (Task.Delay(80)) for download polling.
 
@@ -373,8 +396,6 @@ class HistoricalFetcher(BaseFetcher):
             return
 
         last_progress_time = start_time  # Track when downloaded-file count last changed.
-        stall_timeout = 300.0  # 5 minutes before stall abort
-
         while True:
             # Check if timeout exceeded
             elapsed = time.time() - start_time
