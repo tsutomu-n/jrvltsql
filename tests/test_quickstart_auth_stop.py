@@ -1,5 +1,10 @@
 """No-live tests for bounded update error propagation."""
 
+import json
+
+import pytest
+
+from scripts import quickstart
 from scripts.quickstart import QuickstartRunner
 
 
@@ -107,3 +112,212 @@ def test_update_fails_after_nonterminal_spec_failure_but_runs_all_specs(
     assert runner._run_fetch_all_rich() is False
     assert calls == expected_specs
     assert runner.spec_results["RACE"]["status"] == "failed"
+
+
+def test_bounded_result_contains_all_six_specs_without_payload(tmp_path) -> None:
+    result_path = tmp_path / "result.json"
+
+    quickstart._write_bounded_build_result(
+        str(result_path),
+        exit_code=1,
+        spec_results={
+            "TOKU": {
+                "status": "failed",
+                "stable_error": "jvopen_auth_expired",
+                "error_message": "must not be written",
+            }
+        },
+    )
+
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["schema_version"] == "jvdata_bounded_build_result_v1"
+    assert result["exit_code"] == 1
+    assert tuple(sorted(result["spec_results"])) == tuple(
+        sorted(quickstart.BOUNDED_UPDATE_SPEC_NAMES)
+    )
+    assert result["spec_results"]["TOKU"] == {
+        "status": "failed",
+        "stable_error": "jvopen_auth_expired",
+    }
+    assert result["spec_results"]["DIFN"]["status"] == "not_run"
+    assert "error_message" not in result["spec_results"]["TOKU"]
+
+
+def test_bounded_result_refuses_overwrite(tmp_path) -> None:
+    result_path = tmp_path / "result.json"
+    result_path.write_text("owner evidence", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        quickstart._write_bounded_build_result(
+            str(result_path),
+            exit_code=0,
+            spec_results={},
+        )
+
+    assert result_path.read_text(encoding="utf-8") == "owner evidence"
+
+
+def test_main_writes_bounded_result_for_runner_outcome(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_path = tmp_path / "result.json"
+
+    class FakeLock:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class FakeRunner:
+        def __init__(self, settings: dict) -> None:
+            assert settings["mode"] == "update"
+            self.spec_results = {
+                name: {"status": "success", "stable_error": None}
+                for name in quickstart.BOUNDED_UPDATE_SPEC_NAMES
+            }
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(
+        quickstart,
+        "_check_service_key",
+        lambda: (True, "fixture"),
+    )
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--from-date",
+            "20260710",
+            "--to-date",
+            "20260724",
+            "--result-json",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["exit_code"] == 0
+    assert all(
+        value["status"] == "success"
+        for value in result["spec_results"].values()
+    )
+
+
+def test_main_writes_bounded_result_when_runner_raises(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_path = tmp_path / "result.json"
+
+    class FakeLock:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class FakeRunner:
+        def __init__(self, _: dict) -> None:
+            self.spec_results = {
+                "TOKU": {
+                    "status": "failed",
+                    "stable_error": "fixture_unexpected_failure",
+                }
+            }
+
+        def run(self) -> int:
+            raise RuntimeError("fixture exception")
+
+    monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(
+        quickstart,
+        "_check_service_key",
+        lambda: (True, "fixture"),
+    )
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--from-date",
+            "20260710",
+            "--to-date",
+            "20260724",
+            "--result-json",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="fixture exception"):
+        quickstart.main()
+
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["exit_code"] == 1
+    assert result["spec_results"]["TOKU"] == {
+        "status": "failed",
+        "stable_error": "fixture_unexpected_failure",
+    }
+    assert result["spec_results"]["RACE"]["status"] == "not_run"
+
+
+def test_main_refuses_existing_result_before_runner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_path = tmp_path / "result.json"
+    result_path.write_text("owner evidence", encoding="utf-8")
+    runner_started = False
+
+    class FakeRunner:
+        def __init__(self, _: dict) -> None:
+            nonlocal runner_started
+            runner_started = True
+
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--from-date",
+            "20260710",
+            "--to-date",
+            "20260724",
+            "--result-json",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 2
+    assert runner_started is False
+    assert result_path.read_text(encoding="utf-8") == "owner evidence"

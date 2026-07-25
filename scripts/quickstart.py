@@ -94,6 +94,37 @@ def interactive_setup() -> dict:
 SETUP_HISTORY_FILE = project_root / "data" / "setup_history.json"
 
 SUBSCRIPTION_ERROR_CODES = frozenset({-111, -114, -115})
+BOUNDED_BUILD_RESULT_SCHEMA_VERSION = "jvdata_bounded_build_result_v1"
+BOUNDED_UPDATE_SPEC_NAMES = ("TOKU", "RACE", "DIFN", "MING", "TCVN", "RCVN")
+
+
+def _write_bounded_build_result(
+    path: str,
+    *,
+    exit_code: int,
+    spec_results: dict,
+) -> None:
+    """Write the bounded BuildRaw result once without row payloads."""
+
+    result_path = Path(path).resolve()
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized = {}
+    for name in BOUNDED_UPDATE_SPEC_NAMES:
+        raw = spec_results.get(name, {})
+        normalized[name] = {
+            "status": raw.get("status", "not_run"),
+            "stable_error": raw.get("stable_error"),
+        }
+    payload = {
+        "schema_version": BOUNDED_BUILD_RESULT_SCHEMA_VERSION,
+        "exit_code": exit_code,
+        "spec_results": normalized,
+    }
+    with result_path.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def _jvlink_error_code(exc: BaseException) -> Optional[int]:
@@ -3607,10 +3638,15 @@ def main():
                         help="バックグラウンド監視を無効化")
     parser.add_argument("--log-file", type=str, default=None,
                         help="ログファイルパス（指定するとログ出力有効。デフォルト: 無効）")
+    parser.add_argument("--result-json", type=str, default=None,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--source", type=str, choices=["jra"], default="jra",
                         help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+
+    if args.result_json and Path(args.result_json).resolve().exists():
+        parser.error("--result-json destination must not already exist")
 
     # ログ設定: --log-file指定時のみファイルに出力
     if args.log_file:
@@ -3714,19 +3750,34 @@ def main():
         if not is_valid:
             print(f"[NG] 中央競馬（JRA）サービス認証エラー: {message}")
             print("JRA-VAN DataLabソフトウェアでサービスキーを設定してください")
+            if args.result_json:
+                _write_bounded_build_result(
+                    args.result_json,
+                    exit_code=1,
+                    spec_results={},
+                )
             sys.exit(1)
 
     # 実行
+    runner = None
+    exit_code = 1
     try:
         with ProcessLock("quickstart"):
             runner = QuickstartRunner(settings)
-            sys.exit(runner.run())
+            exit_code = runner.run()
     except ProcessLockError as e:
         if RICH_AVAILABLE:
             console.print(f"[red]エラー: {e}[/red]")
         else:
             print(f"エラー: {e}")
-        sys.exit(1)
+    finally:
+        if args.result_json:
+            _write_bounded_build_result(
+                args.result_json,
+                exit_code=exit_code,
+                spec_results=runner.spec_results if runner is not None else {},
+            )
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
