@@ -1,6 +1,7 @@
 """No-live tests for bounded update error propagation."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,92 @@ def test_update_stops_after_terminal_auth_error(monkeypatch) -> None:
     assert all(
         runner.spec_results[spec]["status"] == "not_run"
         for spec in expected_specs[1:]
+    )
+
+
+def test_create_tables_targets_exact_sqlite_path(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "bounded.db"
+    runner = QuickstartRunner(
+        {
+            "mode": "update",
+            "db_type": "sqlite",
+            "db_path": str(db_path),
+        }
+    )
+    seen: dict = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(quickstart.subprocess, "run", fake_run)
+
+    assert runner._run_create_tables() is True
+    assert seen["command"] == [
+        quickstart.sys.executable,
+        "-m",
+        "src.cli.main",
+        "create-tables",
+        "--db",
+        "sqlite",
+        "--db-path",
+        str(db_path),
+    ]
+
+
+def test_quickstart_sqlite_database_does_not_require_postgresql_driver(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import builtins
+
+    db_path = tmp_path / "bounded.db"
+    runner = QuickstartRunner(
+        {
+            "mode": "update",
+            "db_type": "sqlite",
+            "db_path": str(db_path),
+        }
+    )
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.endswith("postgresql_handler"):
+            raise AssertionError("SQLite runner imported PostgreSQL backend")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    database = runner._create_database()
+
+    assert database.get_db_type() == "sqlite"
+    assert database.db_path == db_path
+
+
+def test_create_tables_failure_preserves_stdout_and_stable_error(
+    monkeypatch,
+) -> None:
+    runner = _runner()
+
+    monkeypatch.setattr(
+        quickstart.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="driver unavailable",
+            stderr="",
+        ),
+    )
+
+    assert runner._run_create_tables() is False
+    assert runner.errors == ["テーブル作成失敗: driver unavailable"]
+    assert set(runner.spec_results) == set(quickstart.BOUNDED_UPDATE_SPEC_NAMES)
+    assert all(
+        result == {
+            "status": "not_run",
+            "stable_error": "table_creation_failed",
+        }
+        for result in runner.spec_results.values()
     )
 
 

@@ -199,6 +199,43 @@ jvlink:
                 len(selected_schemas),
             )
 
+    def test_create_tables_uses_exact_sqlite_path(self):
+        """An explicit SQLite path must override the config database path."""
+        with self.runner.isolated_filesystem():
+            config_path = Path("config.yaml")
+            config_path.write_text(
+                """
+database:
+  type: sqlite
+databases:
+  sqlite:
+    enabled: true
+    path: ignored.db
+jvlink:
+  service_key: ""
+"""
+            )
+            exact_path = Path("exact") / "bounded.db"
+            exact_path.parent.mkdir()
+
+            result = self.runner.invoke(
+                cli,
+                [
+                    "--config",
+                    str(config_path),
+                    "create-tables",
+                    "--db",
+                    "sqlite",
+                    "--db-path",
+                    str(exact_path),
+                    "--rt-only",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertTrue(exact_path.exists())
+            self.assertFalse(Path("ignored.db").exists())
+
     def test_create_tables_fails_when_schema_verification_fails(self):
         with self.runner.isolated_filesystem():
             config_path = Path("config.yaml")

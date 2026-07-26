@@ -40,11 +40,6 @@ def create_database_from_config(
         ValueError: If the resolved db_type is not supported.
         DatabaseError: If PostgreSQL is requested without matching config.
     """
-    # Local imports to avoid circular-import friction with base.py.
-    from .sqlite_handler import SQLiteDatabase
-    from .postgresql_handler import PostgreSQLDatabase
-    from .dual_handler import DualDatabase
-
     if db_type_override:
         db_type = db_type_override
     elif config is not None:
@@ -53,12 +48,18 @@ def create_database_from_config(
         db_type = "sqlite"
 
     if db_type == "sqlite":
+        # SQLite-only installations must not require an optional PostgreSQL
+        # driver merely to construct their configured backend.
+        from .sqlite_handler import SQLiteDatabase
+
         sqlite_config = (
             config.get("databases.sqlite") if config else {"path": "data/keiba.db"}
         )
         return SQLiteDatabase(sqlite_config)
 
     if db_type == "postgresql":
+        from .postgresql_handler import PostgreSQLDatabase
+
         if not config:
             raise DatabaseError(
                 "PostgreSQL requires a configuration file with "
@@ -67,6 +68,10 @@ def create_database_from_config(
         return PostgreSQLDatabase(config.get("databases.postgresql"))
 
     if db_type == "dual":
+        from .dual_handler import DualDatabase
+        from .postgresql_handler import PostgreSQLDatabase
+        from .sqlite_handler import SQLiteDatabase
+
         if not config:
             raise DatabaseError(
                 "Dual-write requires a configuration file with both "

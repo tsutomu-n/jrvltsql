@@ -1994,13 +1994,13 @@ class QuickstartRunner:
         Returns:
             BaseDatabase: SQLiteDatabase または PostgreSQLDatabaseのインスタンス
         """
-        from src.database.sqlite_handler import SQLiteDatabase
-        from src.database.postgresql_handler import PostgreSQLDatabase
         from src.database.base import DatabaseError
 
         db_type = self.settings.get('db_type', 'sqlite')
 
         if db_type == 'postgresql':
+            from src.database.postgresql_handler import PostgreSQLDatabase
+
             # PostgreSQL設定
             db_config = {
                 'host': self.settings.get('pg_host', 'localhost'),
@@ -2015,6 +2015,8 @@ class QuickstartRunner:
                 raise DatabaseError(f"PostgreSQL接続に失敗しました: {e}")
         else:
             # SQLite設定（デフォルト）
+            from src.database.sqlite_handler import SQLiteDatabase
+
             db_config = {"path": str(self.db_path)}
             return SQLiteDatabase(db_config)
 
@@ -3176,8 +3178,19 @@ class QuickstartRunner:
     def _run_create_tables(self) -> bool:
         """テーブル作成"""
         try:
+            db_type = self.settings.get('db_type', 'sqlite')
+            command = [
+                sys.executable,
+                "-m",
+                "src.cli.main",
+                "create-tables",
+                "--db",
+                db_type,
+            ]
+            if db_type == 'sqlite':
+                command.extend(["--db-path", str(self.db_path)])
             result = subprocess.run(
-                [sys.executable, "-m", "src.cli.main", "create-tables"],
+                command,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -3186,10 +3199,29 @@ class QuickstartRunner:
                 timeout=60,
             )
             if result.returncode != 0:
-                self.errors.append(f"テーブル作成失敗: {result.stderr}")
+                details = (result.stderr or result.stdout).strip()
+                self.errors.append(f"テーブル作成失敗: {details}")
+                self.spec_results.update(
+                    {
+                        name: {
+                            "status": "not_run",
+                            "stable_error": "table_creation_failed",
+                        }
+                        for name in BOUNDED_UPDATE_SPEC_NAMES
+                    }
+                )
             return result.returncode == 0
         except Exception as e:
             self.errors.append(f"テーブル作成エラー: {e}")
+            self.spec_results.update(
+                {
+                    name: {
+                        "status": "not_run",
+                        "stable_error": "table_creation_failed",
+                    }
+                    for name in BOUNDED_UPDATE_SPEC_NAMES
+                }
+            )
             return False
 
     def _run_create_indexes(self) -> bool:

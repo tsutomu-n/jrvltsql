@@ -873,11 +873,17 @@ def stop(ctx):
 
 @cli.command()
 @click.option("--db", type=click.Choice(["sqlite", "postgresql"]), default=None, help="Database type (default: from config)")
+@click.option(
+    "--db-path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Exact SQLite database path (overrides config)",
+)
 @click.option("--all", "create_all", is_flag=True, help="Create both NL_ and RT_ tables")
 @click.option("--nl-only", is_flag=True, help="Create only NL_ (Normal Load) tables")
 @click.option("--rt-only", is_flag=True, help="Create only RT_ (Real-Time) tables")
 @click.pass_context
-def create_tables(ctx, db, create_all, nl_only, rt_only):
+def create_tables(ctx, db, db_path, create_all, nl_only, rt_only):
     """Create database tables.
 
     \b
@@ -908,7 +914,17 @@ def create_tables(ctx, db, create_all, nl_only, rt_only):
     try:
         # Initialize database
         try:
-            database = create_database_from_config(config, db_type_override=db_type)
+            if db_path is not None:
+                if db_type != "sqlite":
+                    raise ValueError("--db-path is supported only with SQLite")
+                from src.database.sqlite_handler import SQLiteDatabase
+
+                database = SQLiteDatabase({"path": str(db_path.resolve())})
+            else:
+                database = create_database_from_config(
+                    config,
+                    db_type_override=db_type,
+                )
         except (ValueError, DatabaseError) as exc:
             console.print(f"[red]Error:[/red] {exc}")
             sys.exit(1)
