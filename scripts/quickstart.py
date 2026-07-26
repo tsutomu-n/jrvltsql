@@ -98,6 +98,19 @@ BOUNDED_BUILD_RESULT_SCHEMA_VERSION = "jvdata_bounded_build_result_v1"
 BOUNDED_UPDATE_SPEC_NAMES = ("TOKU", "RACE", "DIFN", "MING", "TCVN", "RCVN")
 
 
+def _service_precheck_stable_error(message: str) -> str:
+    """Classify a failure that occurs before any bounded spec can run."""
+
+    normalized = message.lower()
+    if "64-bit python" in normalized and "32-bit" in normalized:
+        return "jvlink_runtime_incompatible"
+    if "pywin32" in normalized:
+        return "jvlink_pywin32_missing"
+    if "jvinit" in normalized:
+        return "jvlink_initialization_failed"
+    return "jvlink_preflight_failed"
+
+
 def _write_bounded_build_result(
     path: str,
     *,
@@ -3765,10 +3778,17 @@ def main():
             print(f"[NG] 中央競馬（JRA）サービス認証エラー: {message}")
             print("JRA-VAN DataLabソフトウェアでサービスキーを設定してください")
             if args.result_json:
+                stable_error = _service_precheck_stable_error(message)
                 _write_bounded_build_result(
                     args.result_json,
                     exit_code=1,
-                    spec_results={},
+                    spec_results={
+                        name: {
+                            "status": "not_run",
+                            "stable_error": stable_error,
+                        }
+                        for name in BOUNDED_UPDATE_SPEC_NAMES
+                    },
                 )
             sys.exit(1)
 

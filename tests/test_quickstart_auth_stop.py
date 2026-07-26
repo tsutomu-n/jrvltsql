@@ -157,6 +157,75 @@ def test_bounded_result_refuses_overwrite(tmp_path) -> None:
     assert result_path.read_text(encoding="utf-8") == "owner evidence"
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "JV-Link検出不可 (64-bit Python使用中): 32-bit Pythonが必要です",
+            "jvlink_runtime_incompatible",
+        ),
+        ("pywin32未インストール: pip install pywin32", "jvlink_pywin32_missing"),
+        ("JVInit: sid パラメータが不正です", "jvlink_initialization_failed"),
+        ("JV-Link未インストールまたはアクセス不可", "jvlink_preflight_failed"),
+    ],
+)
+def test_service_precheck_has_stable_error(message, expected) -> None:
+    assert quickstart._service_precheck_stable_error(message) == expected
+
+
+def test_main_preserves_service_precheck_failure_for_all_specs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_path = tmp_path / "result.json"
+    runner_started = False
+
+    class FakeRunner:
+        def __init__(self, _: dict) -> None:
+            nonlocal runner_started
+            runner_started = True
+
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(
+        quickstart,
+        "_check_service_key",
+        lambda: (
+            False,
+            "JV-Link検出不可 (64-bit Python使用中): 32-bit Pythonが必要です",
+        ),
+    )
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--from-date",
+            "20260712",
+            "--to-date",
+            "20260726",
+            "--result-json",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 1
+    assert runner_started is False
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert all(
+        value == {
+            "status": "not_run",
+            "stable_error": "jvlink_runtime_incompatible",
+        }
+        for value in result["spec_results"].values()
+    )
+
+
 def test_main_writes_bounded_result_for_runner_outcome(
     tmp_path,
     monkeypatch,
