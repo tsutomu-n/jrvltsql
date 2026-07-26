@@ -10,6 +10,7 @@ migration outside these startup paths.
 """
 
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
 from src.database.base import BaseDatabase
@@ -20,6 +21,16 @@ logger = get_logger(__name__)
 
 class SchemaMigrationError(RuntimeError):
     """Raised when a table cannot satisfy its required schema safely."""
+
+
+@dataclass(frozen=True)
+class TableMigrationPlan:
+    """A read-only decision for one existing table."""
+
+    table_name: str
+    expected_definitions: Dict[str, str]
+    missing_columns: List[str]
+    extra_columns: List[str]
 
 
 def _migration_targets(db: BaseDatabase) -> tuple[BaseDatabase, ...]:
@@ -247,7 +258,7 @@ def _add_missing_columns(
     """Add missing columns without touching existing data."""
     if missing_columns and not commit:
         if db.get_db_type() == "sqlite":
-            connection = getattr(db, "_connection", None)
+            connection = getattr(db, "_connection", None) or getattr(db, "conn", None)
             if connection is None:
                 raise SchemaMigrationError("SQLite migration requires a connected database")
             if not connection.in_transaction:
@@ -265,6 +276,142 @@ def _add_missing_columns(
     if added and commit:
         db.commit()
     return added
+
+
+def _plan_table_migration(
+    db: BaseDatabase,
+    table_name: str,
+    schema_sql: str,
+) -> Optional[TableMigrationPlan]:
+    """Inspect one table without applying DDL."""
+    if not db.table_exists(table_name):
+        return None
+
+    expected_definitions = _extract_column_definitions(schema_sql)
+    expected_pk = _extract_primary_key_columns(schema_sql)
+    if expected_definitions is None or expected_pk is None:
+        raise SchemaMigrationError(f"Could not parse expected schema for {table_name}")
+
+    existing_columns = _get_existing_columns(db, table_name)
+    existing_pk = _get_existing_primary_key_columns(db, table_name)
+    existing_pk_lower = [column.lower() for column in existing_pk]
+    expected_pk_lower = [column.lower() for column in expected_pk]
+    if expected_pk_lower and existing_pk_lower != expected_pk_lower:
+        raise SchemaMigrationError(
+            f"Schema preflight failed for {table_name}: "
+            f"primary key existing={existing_pk}, expected={expected_pk}"
+        )
+    if existing_pk_lower and not expected_pk_lower:
+        logger.warning(
+            f"Existing primary key for {table_name} is not declared by the "
+            f"expected schema: existing={existing_pk}. Constraint is preserved."
+        )
+
+    existing_lower = {column.lower() for column in existing_columns}
+    expected_lower = {column.lower() for column in expected_definitions}
+    missing_columns = [
+        column
+        for column in expected_definitions
+        if column.lower() not in existing_lower
+    ]
+    extra_columns = sorted(
+        column
+        for column in existing_columns
+        if column.lower() not in expected_lower
+    )
+    return TableMigrationPlan(
+        table_name=table_name,
+        expected_definitions=expected_definitions,
+        missing_columns=missing_columns,
+        extra_columns=extra_columns,
+    )
+
+
+def preflight_all_table_migrations(
+    db: BaseDatabase,
+    schemas: Dict[str, str],
+) -> Dict[str, List[str]]:
+    """Validate every existing table before any schema mutation.
+
+    Returns a stable table -> missing-columns map for operator evidence.
+    Any unsafe primary-key or schema-parser mismatch raises before DDL starts.
+    """
+    targets = _migration_targets(db)
+    result: Dict[str, List[str]] = {}
+    for target in targets:
+        target_name = target.get_db_type()
+        for table_name, schema_sql in schemas.items():
+            plan = _plan_table_migration(target, table_name, schema_sql)
+            if plan is None:
+                continue
+            key = table_name if len(targets) == 1 else f"{target_name}:{table_name}"
+            result[key] = list(plan.missing_columns)
+    return result
+
+
+def _begin_schema_transaction(db: BaseDatabase) -> None:
+    """Start an explicit DDL transaction for one concrete backend."""
+    if db.get_db_type() == "sqlite":
+        connection = getattr(db, "_connection", None) or getattr(db, "conn", None)
+        if connection is None:
+            raise SchemaMigrationError("SQLite migration requires a connected database")
+        if connection.in_transaction:
+            raise SchemaMigrationError(
+                "Schema migration requires no pre-existing SQLite transaction"
+            )
+        db.execute("BEGIN")
+        return
+    db.begin_transaction()
+
+
+def _rollback_schema_transaction(db: BaseDatabase) -> None:
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        rollback()
+        return
+    connection = getattr(db, "_connection", None) or getattr(db, "conn", None)
+    if connection is None:
+        raise SchemaMigrationError("Schema rollback requires a connected database")
+    connection.rollback()
+
+
+def _apply_plans_atomically(
+    db: BaseDatabase,
+    plans: List[TableMigrationPlan],
+) -> int:
+    """Apply additive DDL for one backend in a single transaction."""
+    if not any(plan.missing_columns for plan in plans):
+        return 0
+
+    _begin_schema_transaction(db)
+    migrated = 0
+    try:
+        for plan in plans:
+            if not plan.missing_columns:
+                if plan.extra_columns:
+                    logger.warning(
+                        f"Schema for {plan.table_name} has extra columns preserved: "
+                        f"{plan.extra_columns}"
+                    )
+                continue
+            _add_missing_columns(
+                db,
+                plan.table_name,
+                plan.expected_definitions,
+                plan.missing_columns,
+                commit=False,
+            )
+            if plan.extra_columns:
+                logger.warning(
+                    f"Schema for {plan.table_name} has extra columns preserved: "
+                    f"{plan.extra_columns}"
+                )
+            migrated += 1
+        db.commit()
+    except Exception:
+        _rollback_schema_transaction(db)
+        raise
+    return migrated
 
 
 def migrate_table_if_needed(
@@ -369,10 +516,29 @@ def migrate_all_tables(db: BaseDatabase, schemas: Dict[str, str]) -> int:
     Returns:
         Number of tables that were migrated (dropped and recreated)
     """
-    migrated = 0
-    for table_name, schema_sql in schemas.items():
-        if migrate_table_if_needed(db, table_name, schema_sql):
-            migrated += 1
+    targets = _migration_targets(db)
+    plans_by_target: List[tuple[BaseDatabase, List[TableMigrationPlan]]] = []
+
+    # Phase 1 is read-only across every selected backend. A blocker in a later
+    # table must not leave earlier tables partially migrated.
+    for target in targets:
+        target_plans = []
+        for table_name, schema_sql in schemas.items():
+            plan = _plan_table_migration(target, table_name, schema_sql)
+            if plan is not None:
+                target_plans.append(plan)
+        plans_by_target.append((target, target_plans))
+
+    # Phase 2 applies one transaction per concrete backend. Dual mode cannot
+    # provide a distributed commit, but all backends are preflighted before
+    # either receives DDL.
+    migrated_tables = set()
+    for target, plans in plans_by_target:
+        _apply_plans_atomically(target, plans)
+        migrated_tables.update(
+            plan.table_name for plan in plans if plan.missing_columns
+        )
+    migrated = len(migrated_tables)
     if migrated:
         logger.info(f"Migrated {migrated} table(s) due to schema changes")
     return migrated

@@ -17,6 +17,7 @@ from src.database.migration import (
     _extract_primary_key_columns,
     migrate_table_if_needed,
     migrate_all_tables,
+    preflight_all_table_migrations,
     verify_table_schema,
 )
 
@@ -420,6 +421,58 @@ def test_migrate_all_tables_multiple(db):
     assert "SanrentanKumi" in h6_cols
 
 
+def test_migrate_all_tables_preflights_later_pk_blocker_before_any_ddl(db):
+    """A late incompatible table must not leave an earlier table migrated."""
+    db.execute(ADDITIVE_OLD_SCHEMA)
+    db.execute(OLD_H6)
+    db.commit()
+
+    with pytest.raises(SchemaMigrationError, match="NL_H6.*primary key"):
+        migrate_all_tables(db, {"NL_H1": NEW_SCHEMA, "NL_H6": NEW_H6})
+
+    h1_cols = {row["name"] for row in db.fetch_all("PRAGMA table_info(NL_H1)")}
+    h6_cols = {row["name"] for row in db.fetch_all("PRAGMA table_info(NL_H6)")}
+    assert "Hyo" not in h1_cols
+    assert "SanrentanHyo" not in h6_cols
+
+
+def test_preflight_all_table_migrations_is_read_only(db):
+    db.execute(ADDITIVE_OLD_SCHEMA)
+    db.commit()
+
+    plans = preflight_all_table_migrations(db, {"NL_H1": NEW_SCHEMA})
+
+    assert plans == {"NL_H1": ["Hyo", "Ninki"]}
+    columns = {row["name"] for row in db.fetch_all("PRAGMA table_info(NL_H1)")}
+    assert "Hyo" not in columns
+    assert "Ninki" not in columns
+
+
+def test_migrate_all_tables_rolls_back_all_ddl_on_apply_failure(
+    db,
+    monkeypatch,
+):
+    db.execute(ADDITIVE_OLD_SCHEMA)
+    db.execute(ADDITIVE_OLD_H6)
+    db.commit()
+    original_execute = db.execute
+
+    def fail_second_table(sql, parameters=None):
+        if sql.startswith('ALTER TABLE "NL_H6"'):
+            raise RuntimeError("synthetic DDL failure")
+        return original_execute(sql, parameters)
+
+    monkeypatch.setattr(db, "execute", fail_second_table)
+
+    with pytest.raises(RuntimeError, match="synthetic DDL failure"):
+        migrate_all_tables(db, {"NL_H1": NEW_SCHEMA, "NL_H6": NEW_H6})
+
+    h1_cols = {row["name"] for row in db.fetch_all("PRAGMA table_info(NL_H1)")}
+    h6_cols = {row["name"] for row in db.fetch_all("PRAGMA table_info(NL_H6)")}
+    assert "Hyo" not in h1_cols
+    assert "SanrentanHyo" not in h6_cols
+
+
 # --- PostgreSQL path tests (mock DB, no server required) ---
 
 
@@ -502,6 +555,19 @@ def test_dual_migration_uses_each_backends_identifier_rules(db, pg_db):
         statement.startswith("ALTER TABLE nl_h1 ADD COLUMN Hyo") for statement in pg_db._executed
     )
     verify_table_schema(dual, "NL_H1", NEW_SCHEMA)
+
+
+def test_dual_migrate_all_counts_each_table_once(db, pg_db):
+    db.execute(ADDITIVE_OLD_SCHEMA)
+    db.commit()
+    pg_db.execute(ADDITIVE_OLD_SCHEMA)
+    dual = DualDatabase(db, pg_db)
+
+    assert migrate_all_tables(dual, {"NL_H1": NEW_SCHEMA}) == 1
+
+    sqlite_columns = {row["name"] for row in db.fetch_all('PRAGMA table_info("NL_H1")')}
+    assert "Hyo" in sqlite_columns
+    assert "Hyo" in pg_db._tables["nl_h1"]
 
 
 def test_dual_migration_skips_unavailable_best_effort_secondary(db, pg_db):
