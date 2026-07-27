@@ -4,6 +4,7 @@ This module provides a Python wrapper for the JV-Link COM API,
 which is used to access JRA-VAN DataLab horse racing data.
 """
 
+from pathlib import Path
 from typing import Optional, Tuple
 
 from src.jvlink.constants import (
@@ -16,6 +17,7 @@ from src.jvlink.constants import (
     JV_RT_SUCCESS,
 )
 from src.jvlink.error_codes import describe_jvlink_error
+from src.jvlink.diagnostic_trace import JVLinkDiagnosticTrace
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -114,7 +116,13 @@ class JVLinkWrapper:
         >>> wrapper.jv_close()
     """
 
-    def __init__(self, sid: str = "UNKNOWN"):
+    def __init__(
+        self,
+        sid: str = "UNKNOWN",
+        *,
+        diagnostic_trace_path: str | Path | None = None,
+        diagnostic_trace_resume: bool = False,
+    ):
         """Initialize JVLinkWrapper.
 
         Args:
@@ -130,6 +138,14 @@ class JVLinkWrapper:
         self._jvlink = None
         self._is_open = False
         self._com_initialized = False
+        self._diagnostic_trace = (
+            JVLinkDiagnosticTrace(
+                diagnostic_trace_path,
+                resume=diagnostic_trace_resume,
+            )
+            if diagnostic_trace_path is not None
+            else None
+        )
 
         try:
             import sys
@@ -140,17 +156,39 @@ class JVLinkWrapper:
             import win32com.client
 
             # Initialize COM
+            self._trace_before("pythoncom.CoInitialize")
             try:
                 pythoncom.CoInitialize()
                 self._com_initialized = True
-            except Exception:
+                self._trace_returned("pythoncom.CoInitialize", None)
+            except Exception as exc:
+                self._trace_exception("pythoncom.CoInitialize", exc)
                 # COM may already be initialized in this thread
                 pass
 
-            self._jvlink = win32com.client.Dispatch("JVDTLab.JVLink")
+            self._trace_before("Dispatch")
+            try:
+                self._jvlink = win32com.client.Dispatch("JVDTLab.JVLink")
+            except Exception as exc:
+                self._trace_exception("Dispatch", exc)
+                raise
+            self._trace_returned("Dispatch", self._jvlink)
             logger.info("JV-Link COM object created", sid=sid)
-        except Exception as e:
-            raise JVLinkError(f"Failed to create JV-Link COM object: {e}")
+        except Exception as exc:
+            self._trace_exception("wrapper_initialization", exc)
+            raise JVLinkError(f"Failed to create JV-Link COM object: {exc}")
+
+    def _trace_before(self, operation: str) -> None:
+        if self._diagnostic_trace is not None:
+            self._diagnostic_trace.record(operation, "started")
+
+    def _trace_returned(self, operation: str, value: object) -> None:
+        if self._diagnostic_trace is not None:
+            self._diagnostic_trace.record(operation, "returned", return_value=value)
+
+    def _trace_exception(self, operation: str, exc: BaseException) -> None:
+        if self._diagnostic_trace is not None:
+            self._diagnostic_trace.record(operation, "exception", exception=exc)
 
     def jv_set_service_key(self, service_key: str) -> int:
         """Set JV-Link service key via Windows registry.
@@ -221,7 +259,13 @@ class JVLinkWrapper:
             >>> assert result == 0
         """
         try:
-            result = self._jvlink.JVInit(self.sid)
+            self._trace_before("JVInit")
+            try:
+                result = self._jvlink.JVInit(self.sid)
+            except Exception as exc:
+                self._trace_exception("JVInit", exc)
+                raise
+            self._trace_returned("JVInit", result)
             if result == JV_RT_SUCCESS:
                 logger.info("JV-Link initialized successfully", sid=self.sid)
             else:
@@ -277,7 +321,13 @@ class JVLinkWrapper:
             # JVOpen signature: (dataspec, fromtime, option, ref readCount, ref downloadCount, out lastFileTimestamp)
             # pywin32: COM methods with ref/out parameters return them as tuple
             # Call with only IN parameters (dataspec, fromtime, option)
-            jv_result = self._jvlink.JVOpen(data_spec, fromtime, option)
+            self._trace_before("JVOpen")
+            try:
+                jv_result = self._jvlink.JVOpen(data_spec, fromtime, option)
+            except Exception as exc:
+                self._trace_exception("JVOpen", exc)
+                raise
+            self._trace_returned("JVOpen", jv_result)
 
             # Handle return value
             if isinstance(jv_result, tuple):
@@ -684,7 +734,13 @@ class JVLinkWrapper:
             >>> wrapper.jv_close()
         """
         try:
-            result = self._jvlink.JVClose()
+            self._trace_before("JVClose")
+            try:
+                result = self._jvlink.JVClose()
+            except Exception as exc:
+                self._trace_exception("JVClose", exc)
+                raise
+            self._trace_returned("JVClose", result)
             self._is_open = False
             logger.info("JV-Link stream closed")
             return result

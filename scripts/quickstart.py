@@ -402,7 +402,9 @@ def _disable_auto_start() -> bool:
         return False
 
 
-def _check_jvlink_service_key() -> tuple[bool, str]:
+def _check_jvlink_service_key(
+    diagnostic_trace_path: str | None = None,
+) -> tuple[bool, str]:
     """JV-Linkのサービスキー設定状況を実際にAPIで確認
 
     Returns:
@@ -412,8 +414,23 @@ def _check_jvlink_service_key() -> tuple[bool, str]:
     is_64bit = struct.calcsize("P") * 8 == 64
     
     try:
-        import win32com.client
-        jvlink = win32com.client.Dispatch("JVDTLab.JVLink")
+        if diagnostic_trace_path is None:
+            import win32com.client
+            jvlink = win32com.client.Dispatch("JVDTLab.JVLink")
+            result = jvlink.JVInit("JLTSQL")
+        else:
+            from src.jvlink.wrapper import JVLinkError, JVLinkWrapper
+
+            wrapper = JVLinkWrapper(
+                "JLTSQL",
+                diagnostic_trace_path=diagnostic_trace_path,
+            )
+            try:
+                result = wrapper.jv_init()
+            except JVLinkError as exc:
+                if type(exc.error_code) is not int:
+                    raise
+                result = exc.error_code
 
         # JVInitで認証チェック（sidは任意の文字列）
         #
@@ -424,8 +441,6 @@ def _check_jvlink_service_key() -> tuple[bool, str]:
         # 形式不正を示すコードで、サービスキー(利用キー)自体の状態を示すもの
         # ではない。サービスキー関連のエラー（未設定・無効・期限切れ等）は
         # JVOpen/JVRTOpen が -301/-302/-303 として返す。
-        result = jvlink.JVInit("JLTSQL")
-
         if result == 0:
             return True, "JV-Link認証OK"
         elif result == -101:
@@ -481,13 +496,13 @@ def _check_service_key_detailed() -> dict:
     return result
 
 
-def _check_service_key() -> tuple[bool, str]:
+def _check_service_key(diagnostic_trace_path: str | None = None) -> tuple[bool, str]:
     """JRAサービスキー確認
 
     Returns:
         (is_valid, message): サービスキーが有効かどうかとメッセージ
     """
-    return _check_jvlink_service_key()
+    return _check_jvlink_service_key(diagnostic_trace_path)
 
 
 # マスコット - シンプルな絵文字ベース
@@ -3470,6 +3485,10 @@ class QuickstartRunner:
                     download_timeout=self.settings.get("download_timeout", 600.0),
                     stall_timeout=self.settings.get("stall_timeout", 300.0),
                     jvstatus_max_retries=self.settings.get("jvstatus_max_retries", 2),
+                    jvlink_diagnostic_trace=self.settings.get("jvlink_diagnostic_trace"),
+                    jvlink_diagnostic_trace_resume=bool(
+                        self.settings.get("jvlink_diagnostic_trace")
+                    ),
                 )
 
                 # データ取得実行
@@ -3702,6 +3721,8 @@ def main():
                         help=argparse.SUPPRESS)
     parser.add_argument("--bounded-spec", choices=["RACE"], default=None,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--jvlink-diagnostic-trace", type=str, default=None,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--source", type=str, choices=["jra"], default="jra",
                         help=argparse.SUPPRESS)
 
@@ -3734,6 +3755,10 @@ def main():
                 "--bounded-spec forbids timeseries, realtime, background, "
                 "and non-SQLite execution"
             )
+    if args.jvlink_diagnostic_trace and args.bounded_spec != "RACE":
+        parser.error("--jvlink-diagnostic-trace requires --bounded-spec RACE")
+    if args.jvlink_diagnostic_trace and Path(args.jvlink_diagnostic_trace).resolve().exists():
+        parser.error("--jvlink-diagnostic-trace destination must not already exist")
 
     # ログ設定: --log-file指定時のみファイルに出力
     if args.log_file:
@@ -3775,6 +3800,7 @@ def main():
         settings['stall_timeout'] = args.stall_timeout
         settings['jvstatus_max_retries'] = args.jvstatus_max_retries
         settings['bounded_spec'] = args.bounded_spec
+        settings['jvlink_diagnostic_trace'] = args.jvlink_diagnostic_trace
 
         # モード設定（デフォルトは簡易）
         mode = args.mode or 'simple'
@@ -3837,7 +3863,10 @@ def main():
         settings['data_source'] = 'jra'
 
         # 非対話モードではサービスキーを自動チェック
-        is_valid, message = _check_service_key()
+        if args.jvlink_diagnostic_trace:
+            is_valid, message = _check_service_key(args.jvlink_diagnostic_trace)
+        else:
+            is_valid, message = _check_service_key()
         if not is_valid:
             print(f"[NG] 中央競馬（JRA）サービス認証エラー: {message}")
             print("JRA-VAN DataLabソフトウェアでサービスキーを設定してください")

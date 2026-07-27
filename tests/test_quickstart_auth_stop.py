@@ -406,7 +406,7 @@ def test_main_accepts_and_propagates_download_timeouts(
 
     monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
     monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
-    monkeypatch.setattr(quickstart, "_check_service_key", lambda: (True, "fixture"))
+    monkeypatch.setattr(quickstart, "_check_service_key", lambda *_: (True, "fixture"))
     monkeypatch.setattr(
         quickstart.sys,
         "argv",
@@ -457,6 +457,7 @@ def test_main_propagates_bounded_race_selection(
     monkeypatch,
 ) -> None:
     result_path = tmp_path / "result.json"
+    trace_path = tmp_path / "diagnostic-trace.json"
     captured_settings: dict = {}
 
     class FakeLock:
@@ -481,7 +482,7 @@ def test_main_propagates_bounded_race_selection(
 
     monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
     monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
-    monkeypatch.setattr(quickstart, "_check_service_key", lambda: (True, "fixture"))
+    monkeypatch.setattr(quickstart, "_check_service_key", lambda *_: (True, "fixture"))
     monkeypatch.setattr(
         quickstart.sys,
         "argv",
@@ -500,6 +501,8 @@ def test_main_propagates_bounded_race_selection(
             "20260727",
             "--result-json",
             str(result_path),
+            "--jvlink-diagnostic-trace",
+            str(trace_path),
         ],
     )
 
@@ -508,6 +511,7 @@ def test_main_propagates_bounded_race_selection(
 
     assert exc_info.value.code == 0
     assert captured_settings["bounded_spec"] == "RACE"
+    assert captured_settings["jvlink_diagnostic_trace"] == str(trace_path)
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["spec_results"]["RACE"]["status"] == "nodata"
     assert all(
@@ -515,6 +519,38 @@ def test_main_propagates_bounded_race_selection(
         for name in quickstart.BOUNDED_UPDATE_SPEC_NAMES
         if name != "RACE"
     )
+
+
+def test_main_rejects_diagnostic_trace_outside_bounded_race(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runner_started = False
+
+    class FakeRunner:
+        def __init__(self, _: dict) -> None:
+            nonlocal runner_started
+            runner_started = True
+
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--jvlink-diagnostic-trace",
+            str(tmp_path / "diagnostic-trace.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 2
+    assert runner_started is False
 
 
 def test_main_rejects_bounded_race_without_exact_jvstatus_retry_limit(

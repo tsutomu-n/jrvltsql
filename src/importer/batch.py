@@ -50,6 +50,8 @@ class BatchProcessor:
         download_timeout: float = 600.0,
         stall_timeout: float = 300.0,
         jvstatus_max_retries: int = 2,
+        jvlink_diagnostic_trace: Optional[str] = None,
+        jvlink_diagnostic_trace_resume: bool = False,
     ):
         """Initialize batch processor.
 
@@ -64,6 +66,8 @@ class BatchProcessor:
             download_timeout: Maximum JV-Link download wait in seconds
             stall_timeout: Maximum wait without download progress in seconds
             jvstatus_max_retries: Maximum retries for retryable JVStatus errors
+            jvlink_diagnostic_trace: Explicit trace path for bounded COM diagnosis
+            jvlink_diagnostic_trace_resume: Continue the trace created by preflight
         """
         self.fetcher = HistoricalFetcher(
             sid,
@@ -72,6 +76,8 @@ class BatchProcessor:
             download_timeout=download_timeout,
             stall_timeout=stall_timeout,
             jvstatus_max_retries=jvstatus_max_retries,
+            jvlink_diagnostic_trace=jvlink_diagnostic_trace,
+            jvlink_diagnostic_trace_resume=jvlink_diagnostic_trace_resume,
         )
         self.importer = DataImporter(database, batch_size)
         self.database = database

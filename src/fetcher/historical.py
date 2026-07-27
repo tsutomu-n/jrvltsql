@@ -53,6 +53,8 @@ class HistoricalFetcher(BaseFetcher):
         download_timeout: float = 600.0,
         stall_timeout: float = 300.0,
         jvstatus_max_retries: int = 2,
+        jvlink_diagnostic_trace: Optional[str] = None,
+        jvlink_diagnostic_trace_resume: bool = False,
     ):
         if download_timeout <= 0:
             raise ValueError("download_timeout must be greater than zero")
@@ -62,7 +64,13 @@ class HistoricalFetcher(BaseFetcher):
             )
         if not isinstance(jvstatus_max_retries, int) or jvstatus_max_retries < 0:
             raise ValueError("jvstatus_max_retries must be a non-negative integer")
-        super().__init__(sid, service_key=service_key, show_progress=show_progress)
+        super().__init__(
+            sid,
+            service_key=service_key,
+            show_progress=show_progress,
+            jvlink_diagnostic_trace=jvlink_diagnostic_trace,
+            jvlink_diagnostic_trace_resume=jvlink_diagnostic_trace_resume,
+        )
         self.cache_manager = None
         self.download_timeout = float(download_timeout)
         self.stall_timeout = float(stall_timeout)

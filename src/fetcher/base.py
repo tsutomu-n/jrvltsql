@@ -61,6 +61,8 @@ class BaseFetcher(ABC):
         sid: str = "UNKNOWN",
         service_key: Optional[str] = None,
         show_progress: bool = True,
+        jvlink_diagnostic_trace: Optional[str] = None,
+        jvlink_diagnostic_trace_resume: bool = False,
     ):
         """Initialize base fetcher.
 
@@ -71,17 +73,23 @@ class BaseFetcher(ABC):
                         If not provided, the service key must be configured in
                         JRA-VAN DataLab application or registry.
             show_progress: Show stylish progress display (default: True)
+            jvlink_diagnostic_trace: Explicit trace path for bounded COM diagnosis.
+            jvlink_diagnostic_trace_resume: Continue the trace created by preflight.
         """
         # Prefer C# JVLinkBridge over Python win32com for JRA operations.
         # Eliminates 32-bit Python requirement and COM instability.
         from src.jvlink.bridge import find_bridge_executable
         bridge_exe = find_bridge_executable()
-        if bridge_exe is not None:
+        if bridge_exe is not None and jvlink_diagnostic_trace is None:
             from src.jvlink.bridge import JVLinkBridge
             logger.info("Using JVLinkBridge (C#) for JRA", bridge_path=str(bridge_exe))
             self.jvlink = JVLinkBridge(sid, bridge_path=bridge_exe)
         else:
-            self.jvlink = JVLinkWrapper(sid)
+            self.jvlink = JVLinkWrapper(
+                sid,
+                diagnostic_trace_path=jvlink_diagnostic_trace,
+                diagnostic_trace_resume=jvlink_diagnostic_trace_resume,
+            )
 
         self.parser_factory = ParserFactory()
         self._records_fetched = 0
