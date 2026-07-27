@@ -436,6 +436,82 @@ def test_main_accepts_and_propagates_download_timeouts(
     assert captured_settings["stall_timeout"] == 299.0
 
 
+def test_bounded_race_selects_only_race_option_two() -> None:
+    runner = QuickstartRunner(
+        {
+            "mode": "update",
+            "bounded_spec": "RACE",
+            "from_date": "20260713",
+            "to_date": "20260727",
+        }
+    )
+
+    assert runner._get_specs_for_mode() == [("RACE", "レース情報", 2)]
+
+
+def test_main_propagates_bounded_race_selection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_path = tmp_path / "result.json"
+    captured_settings: dict = {}
+
+    class FakeLock:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class FakeRunner:
+        def __init__(self, settings: dict) -> None:
+            captured_settings.update(settings)
+            self.spec_results = {
+                "RACE": {"status": "nodata", "stable_error": None}
+            }
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(quickstart, "_check_service_key", lambda: (True, "fixture"))
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--bounded-spec",
+            "RACE",
+            "--from-date",
+            "20260713",
+            "--to-date",
+            "20260727",
+            "--result-json",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 0
+    assert captured_settings["bounded_spec"] == "RACE"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["spec_results"]["RACE"]["status"] == "nodata"
+    assert all(
+        result["spec_results"][name]["status"] == "not_run"
+        for name in quickstart.BOUNDED_UPDATE_SPEC_NAMES
+        if name != "RACE"
+    )
+
+
 @pytest.mark.parametrize(
     ("download_timeout", "stall_timeout"),
     [("0", "1"), ("600", "0"), ("600", "600"), ("600", "601")],

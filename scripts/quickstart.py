@@ -2144,6 +2144,12 @@ class QuickstartRunner:
 
     def _get_specs_for_mode(self) -> list:
         """モードに応じたスペックリストを取得（蓄積系のみ）"""
+        bounded_spec = self.settings.get("bounded_spec")
+        if bounded_spec:
+            if bounded_spec != "RACE":
+                raise ValueError(f"Unsupported bounded spec: {bounded_spec}")
+            return [("RACE", "レース情報", 2)]
+
         mode = self.settings.get('mode', 'simple')
         if mode == 'simple':
             specs = self.SIMPLE_SPECS.copy()
@@ -3691,6 +3697,8 @@ def main():
                         help=argparse.SUPPRESS)
     parser.add_argument("--result-json", type=str, default=None,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--bounded-spec", choices=["RACE"], default=None,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--source", type=str, choices=["jra"], default="jra",
                         help=argparse.SUPPRESS)
 
@@ -3704,6 +3712,21 @@ def main():
         )
     if args.result_json and Path(args.result_json).resolve().exists():
         parser.error("--result-json destination must not already exist")
+    if args.bounded_spec:
+        if not args.result_json:
+            parser.error("--bounded-spec requires --result-json")
+        if args.mode != "update" or not args.yes:
+            parser.error("--bounded-spec requires --mode update --yes")
+        if (
+            args.include_timeseries
+            or args.include_realtime
+            or args.background
+            or args.db_type != "sqlite"
+        ):
+            parser.error(
+                "--bounded-spec forbids timeseries, realtime, background, "
+                "and non-SQLite execution"
+            )
 
     # ログ設定: --log-file指定時のみファイルに出力
     if args.log_file:
@@ -3743,6 +3766,7 @@ def main():
         settings['to_date'] = args.to_date if args.to_date else today.strftime("%Y%m%d")
         settings['download_timeout'] = args.download_timeout
         settings['stall_timeout'] = args.stall_timeout
+        settings['bounded_spec'] = args.bounded_spec
 
         # モード設定（デフォルトは簡易）
         mode = args.mode or 'simple'
