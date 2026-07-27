@@ -25,11 +25,13 @@ def test_batch_processor_propagates_download_timeouts(monkeypatch):
         database,
         download_timeout=601,
         stall_timeout=299,
+        jvstatus_max_retries=1,
     )
 
     assert processor.fetcher is not None
     assert captured["download_timeout"] == 601
     assert captured["stall_timeout"] == 299
+    assert captured["jvstatus_max_retries"] == 1
 
 
 def test_option_3_setup_range_splits_long_periods():

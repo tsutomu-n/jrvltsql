@@ -423,6 +423,8 @@ def test_main_accepts_and_propagates_download_timeouts(
             "601",
             "--stall-timeout",
             "299",
+            "--jvstatus-max-retries",
+            "1",
             "--result-json",
             str(result_path),
         ],
@@ -434,6 +436,7 @@ def test_main_accepts_and_propagates_download_timeouts(
     assert exc_info.value.code == 0
     assert captured_settings["download_timeout"] == 601.0
     assert captured_settings["stall_timeout"] == 299.0
+    assert captured_settings["jvstatus_max_retries"] == 1
 
 
 def test_bounded_race_selects_only_race_option_two() -> None:
@@ -489,6 +492,8 @@ def test_main_propagates_bounded_race_selection(
             "update",
             "--bounded-spec",
             "RACE",
+            "--jvstatus-max-retries",
+            "1",
             "--from-date",
             "20260713",
             "--to-date",
@@ -510,6 +515,45 @@ def test_main_propagates_bounded_race_selection(
         for name in quickstart.BOUNDED_UPDATE_SPEC_NAMES
         if name != "RACE"
     )
+
+
+def test_main_rejects_bounded_race_without_exact_jvstatus_retry_limit(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_path = tmp_path / "result.json"
+    runner_started = False
+
+    class FakeRunner:
+        def __init__(self, _: dict) -> None:
+            nonlocal runner_started
+            runner_started = True
+
+    monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
+    monkeypatch.setattr(
+        quickstart.sys,
+        "argv",
+        [
+            "quickstart.py",
+            "--yes",
+            "--mode",
+            "update",
+            "--bounded-spec",
+            "RACE",
+            "--from-date",
+            "20260713",
+            "--to-date",
+            "20260727",
+            "--result-json",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        quickstart.main()
+
+    assert exc_info.value.code == 2
+    assert runner_started is False
 
 
 @pytest.mark.parametrize(

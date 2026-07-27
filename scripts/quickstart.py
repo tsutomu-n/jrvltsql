@@ -3469,6 +3469,7 @@ class QuickstartRunner:
                     show_progress=True,
                     download_timeout=self.settings.get("download_timeout", 600.0),
                     stall_timeout=self.settings.get("stall_timeout", 300.0),
+                    jvstatus_max_retries=self.settings.get("jvstatus_max_retries", 2),
                 )
 
                 # データ取得実行
@@ -3695,6 +3696,8 @@ def main():
                         help=argparse.SUPPRESS)
     parser.add_argument("--stall-timeout", type=float, default=300.0,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--jvstatus-max-retries", type=int, default=2,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--result-json", type=str, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--bounded-spec", choices=["RACE"], default=None,
@@ -3710,6 +3713,8 @@ def main():
         parser.error(
             "--stall-timeout must be greater than zero and less than --download-timeout"
         )
+    if args.jvstatus_max_retries < 0:
+        parser.error("--jvstatus-max-retries must be a non-negative integer")
     if args.result_json and Path(args.result_json).resolve().exists():
         parser.error("--result-json destination must not already exist")
     if args.bounded_spec:
@@ -3717,6 +3722,8 @@ def main():
             parser.error("--bounded-spec requires --result-json")
         if args.mode != "update" or not args.yes:
             parser.error("--bounded-spec requires --mode update --yes")
+        if args.jvstatus_max_retries != 1:
+            parser.error("--bounded-spec requires --jvstatus-max-retries 1")
         if (
             args.include_timeseries
             or args.include_realtime
@@ -3766,6 +3773,7 @@ def main():
         settings['to_date'] = args.to_date if args.to_date else today.strftime("%Y%m%d")
         settings['download_timeout'] = args.download_timeout
         settings['stall_timeout'] = args.stall_timeout
+        settings['jvstatus_max_retries'] = args.jvstatus_max_retries
         settings['bounded_spec'] = args.bounded_spec
 
         # モード設定（デフォルトは簡易）

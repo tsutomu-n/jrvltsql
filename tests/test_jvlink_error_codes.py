@@ -129,6 +129,20 @@ def test_jvstatus_download_failure_retries_then_preserves_error(monkeypatch) -> 
     assert error.retryable is True
 
 
+def test_jvstatus_download_failure_honors_one_retry_limit(monkeypatch) -> None:
+    with patch("win32com.client.Dispatch", return_value=MagicMock()):
+        fetcher = HistoricalFetcher(show_progress=False, jvstatus_max_retries=1)
+    fetcher.jvlink = MagicMock()
+    fetcher.jvlink.jv_status.side_effect = [-502, -502]
+    monkeypatch.setattr("src.fetcher.historical.time.sleep", lambda _: None)
+
+    with pytest.raises(FetcherError) as exc_info:
+        fetcher._wait_for_download(download_count=1, timeout=1, interval=0)
+
+    assert fetcher.jvlink.jv_status.call_count == 2
+    assert exc_info.value.stable_error == "jvstatus_download_failed"
+
+
 def test_jvstatus_open_not_called_does_not_retry(monkeypatch) -> None:
     with patch("win32com.client.Dispatch", return_value=MagicMock()):
         fetcher = HistoricalFetcher(show_progress=False)

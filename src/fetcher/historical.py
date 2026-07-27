@@ -52,6 +52,7 @@ class HistoricalFetcher(BaseFetcher):
         show_progress: bool = True,
         download_timeout: float = 600.0,
         stall_timeout: float = 300.0,
+        jvstatus_max_retries: int = 2,
     ):
         if download_timeout <= 0:
             raise ValueError("download_timeout must be greater than zero")
@@ -59,10 +60,13 @@ class HistoricalFetcher(BaseFetcher):
             raise ValueError(
                 "stall_timeout must be greater than zero and less than download_timeout"
             )
+        if not isinstance(jvstatus_max_retries, int) or jvstatus_max_retries < 0:
+            raise ValueError("jvstatus_max_retries must be a non-negative integer")
         super().__init__(sid, service_key=service_key, show_progress=show_progress)
         self.cache_manager = None
         self.download_timeout = float(download_timeout)
         self.stall_timeout = float(stall_timeout)
+        self.jvstatus_max_retries = jvstatus_max_retries
 
     def fetch(
         self,
@@ -391,7 +395,7 @@ class HistoricalFetcher(BaseFetcher):
         start_time = time.time()
         last_status = None
         retry_count = 0
-        max_retries = 2  # Maximum retries for temporary errors
+        max_retries = self.jvstatus_max_retries
         if download_count <= 0:
             return
 

@@ -49,6 +49,7 @@ class BatchProcessor:
         cache_manager=None,
         download_timeout: float = 600.0,
         stall_timeout: float = 300.0,
+        jvstatus_max_retries: int = 2,
     ):
         """Initialize batch processor.
 
@@ -62,6 +63,7 @@ class BatchProcessor:
             cache_manager: Optional CacheManager for local file cache read/write
             download_timeout: Maximum JV-Link download wait in seconds
             stall_timeout: Maximum wait without download progress in seconds
+            jvstatus_max_retries: Maximum retries for retryable JVStatus errors
         """
         self.fetcher = HistoricalFetcher(
             sid,
@@ -69,6 +71,7 @@ class BatchProcessor:
             show_progress=show_progress,
             download_timeout=download_timeout,
             stall_timeout=stall_timeout,
+            jvstatus_max_retries=jvstatus_max_retries,
         )
         self.importer = DataImporter(database, batch_size)
         self.database = database
