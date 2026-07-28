@@ -236,6 +236,43 @@ jvlink:
             self.assertTrue(exact_path.exists())
             self.assertFalse(Path("ignored.db").exists())
 
+    def test_create_tables_uses_exact_sqlite_path_without_config(self):
+        """Explicit SQLite creation must not depend on local config state."""
+        with self.runner.isolated_filesystem():
+            exact_path = Path("exact") / "bounded.db"
+
+            with patch(
+                "src.cli.main._default_config_path",
+                return_value=Path("missing-config.yaml"),
+            ):
+                result = self.runner.invoke(
+                    cli,
+                    [
+                        "create-tables",
+                        "--db",
+                        "sqlite",
+                        "--db-path",
+                        str(exact_path),
+                        "--rt-only",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertTrue(exact_path.exists())
+            self.assertNotIn("Configuration file not found", result.output)
+
+    def test_create_tables_without_config_or_db_still_fails(self):
+        """Only an explicit database selection may bypass configuration."""
+        with self.runner.isolated_filesystem():
+            with patch(
+                "src.cli.main._default_config_path",
+                return_value=Path("missing-config.yaml"),
+            ):
+                result = self.runner.invoke(cli, ["create-tables"])
+
+            self.assertEqual(result.exit_code, 1, result.output)
+            self.assertIn("No configuration found", result.output)
+
     def test_create_tables_fails_when_schema_verification_fails(self):
         with self.runner.isolated_filesystem():
             config_path = Path("config.yaml")

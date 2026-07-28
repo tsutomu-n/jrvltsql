@@ -42,6 +42,12 @@ def _read_version():
 
 __version__ = _read_version()
 
+
+def _default_config_path() -> Path:
+    """Return the project-local default configuration path."""
+    return Path(__file__).parent.parent.parent / "config" / "config.yaml"
+
+
 # Console for rich output (Windows cp932-safe)
 console = Console(legacy_windows=True)
 logger = get_logger(__name__)
@@ -98,12 +104,12 @@ def cli(ctx, config, verbose):
         config_path = config
     else:
         # Try default path
-        project_root = Path(__file__).parent.parent.parent
-        config_path = project_root / "config" / "config.yaml"
+        config_path = _default_config_path()
 
         if not config_path.exists():
-            # Config not found, use default for init command
-            if ctx.invoked_subcommand != "init":
+            # init and create-tables with an explicit --db can operate without
+            # a project config. create_tables performs the final --db check.
+            if ctx.invoked_subcommand not in ("init", "create-tables"):
                 console.print(
                     "[red]Error:[/red] Configuration file not found. "
                     "Run 'jltsql init' first.",
