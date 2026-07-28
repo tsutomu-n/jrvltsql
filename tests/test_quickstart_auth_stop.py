@@ -7,6 +7,27 @@ import pytest
 
 from scripts import quickstart
 from scripts.quickstart import QuickstartRunner
+from src.jvlink import wrapper as jvlink_wrapper
+
+
+def _runtime_ready() -> quickstart.JVLinkRuntimeCheck:
+    return quickstart.JVLinkRuntimeCheck(
+        ok=True,
+        stage="jvinit",
+        stable_error=None,
+        operator_message="fixture runtime ready",
+        runtime_bits=32,
+    )
+
+
+def _runtime_unavailable() -> quickstart.JVLinkRuntimeCheck:
+    return quickstart.JVLinkRuntimeCheck(
+        ok=False,
+        stage="com_bootstrap",
+        stable_error="jvlink_com_unavailable",
+        operator_message="JV-Link COMアクセス失敗",
+        runtime_bits=32,
+    )
 
 
 def _runner() -> QuickstartRunner:
@@ -244,20 +265,129 @@ def test_bounded_result_refuses_overwrite(tmp_path) -> None:
     assert result_path.read_text(encoding="utf-8") == "owner evidence"
 
 
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
-        (
-            "JV-Link検出不可 (64-bit Python使用中): 32-bit Pythonが必要です",
-            "jvlink_runtime_incompatible",
-        ),
-        ("pywin32未インストール: pip install pywin32", "jvlink_pywin32_missing"),
-        ("JVInit: sid パラメータが不正です", "jvlink_initialization_failed"),
-        ("JV-Link未インストールまたはアクセス不可", "jvlink_preflight_failed"),
-    ],
-)
-def test_service_precheck_has_stable_error(message, expected) -> None:
-    assert quickstart._service_precheck_stable_error(message) == expected
+def test_runtime_check_success_does_not_claim_service_auth(monkeypatch) -> None:
+    cleaned_up = False
+
+    class FakeWrapper:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def jv_init(self) -> int:
+            return 0
+
+        def cleanup(self) -> None:
+            nonlocal cleaned_up
+            cleaned_up = True
+
+    monkeypatch.setattr(jvlink_wrapper, "JVLinkWrapper", FakeWrapper)
+
+    result = quickstart._check_jvlink_runtime()
+
+    assert result.ok is True
+    assert result.stage == "jvinit"
+    assert result.stable_error is None
+    assert "COM初期化OK" in result.operator_message
+    assert "認証OK" not in result.operator_message
+    assert cleaned_up is True
+
+
+def test_runtime_check_classifies_missing_pywin32_without_exception_text(
+    monkeypatch,
+) -> None:
+    private_text = "private dependency path"
+
+    def missing_wrapper(*_: object, **__: object) -> None:
+        raise ModuleNotFoundError(
+            f"No module named 'win32com': {private_text}",
+            name="win32com",
+        )
+
+    monkeypatch.setattr(jvlink_wrapper, "JVLinkWrapper", missing_wrapper)
+
+    result = quickstart._check_jvlink_runtime()
+
+    assert result.ok is False
+    assert result.stage == "com_bootstrap"
+    assert result.stable_error == "jvlink_pywin32_missing"
+    assert private_text not in result.operator_message
+
+
+def test_runtime_check_sanitizes_dispatch_failure(monkeypatch) -> None:
+    private_text = "private COM registration detail"
+
+    def failing_wrapper(*_: object, **__: object) -> None:
+        raise RuntimeError(private_text)
+
+    monkeypatch.setattr(jvlink_wrapper, "JVLinkWrapper", failing_wrapper)
+
+    result = quickstart._check_jvlink_runtime()
+
+    assert result.ok is False
+    assert result.stage == "com_bootstrap"
+    assert result.stable_error == "jvlink_com_unavailable"
+    assert result.operator_message == "JV-Link COMアクセス失敗"
+    assert private_text not in result.operator_message
+
+
+def test_runtime_check_classifies_jvinit_failure(monkeypatch) -> None:
+    cleaned_up = False
+
+    class JVInitFailure(RuntimeError):
+        error_code = -103
+
+    class FakeWrapper:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def jv_init(self) -> int:
+            raise JVInitFailure("private JVInit detail")
+
+        def cleanup(self) -> None:
+            nonlocal cleaned_up
+            cleaned_up = True
+
+    monkeypatch.setattr(jvlink_wrapper, "JVLinkWrapper", FakeWrapper)
+
+    result = quickstart._check_jvlink_runtime()
+
+    assert result.ok is False
+    assert result.stage == "jvinit"
+    assert result.stable_error == "jvlink_initialization_failed"
+    assert result.operator_message == "JV-Link COM初期化失敗 (JVInit code: -103)"
+    assert "private JVInit detail" not in result.operator_message
+    assert cleaned_up is True
+
+
+def test_runner_rich_prerequisite_reuses_injected_runtime_check(
+    monkeypatch,
+) -> None:
+    runtime_check = _runtime_ready()
+    runner = QuickstartRunner({}, jvlink_runtime_check=runtime_check)
+    monkeypatch.setattr(quickstart.sys, "platform", "win32")
+    monkeypatch.setattr(
+        quickstart,
+        "_check_jvlink_runtime",
+        lambda *_: pytest.fail("runtime check was executed twice"),
+    )
+
+    assert runner._check_prerequisites_rich() is True
+    assert runner._jvlink_runtime_check is runtime_check
+
+
+def test_runner_simple_prerequisite_reuses_injected_runtime_check(
+    monkeypatch,
+) -> None:
+    runtime_check = _runtime_ready()
+    runner = QuickstartRunner({}, jvlink_runtime_check=runtime_check)
+    monkeypatch.setattr(quickstart.sys, "platform", "win32")
+    monkeypatch.setattr(
+        quickstart,
+        "_check_jvlink_runtime",
+        lambda *_: pytest.fail("runtime check was executed twice"),
+    )
+
+    assert runner._check_prerequisites_simple() is True
+    assert runner._jvlink_runtime_check is runtime_check
 
 
 def test_main_preserves_service_precheck_failure_for_all_specs(
@@ -268,18 +398,20 @@ def test_main_preserves_service_precheck_failure_for_all_specs(
     runner_started = False
 
     class FakeRunner:
-        def __init__(self, _: dict) -> None:
+        def __init__(
+            self,
+            _: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             nonlocal runner_started
             runner_started = True
 
     monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
     monkeypatch.setattr(
         quickstart,
-        "_check_service_key",
-        lambda: (
-            False,
-            "JV-Link検出不可 (64-bit Python使用中): 32-bit Pythonが必要です",
-        ),
+        "_check_jvlink_runtime",
+        lambda *_: _runtime_unavailable(),
     )
     monkeypatch.setattr(
         quickstart.sys,
@@ -307,7 +439,7 @@ def test_main_preserves_service_precheck_failure_for_all_specs(
     assert all(
         value == {
             "status": "not_run",
-            "stable_error": "jvlink_runtime_incompatible",
+            "stable_error": "jvlink_com_unavailable",
         }
         for value in result["spec_results"].values()
     )
@@ -318,6 +450,8 @@ def test_main_writes_bounded_result_for_runner_outcome(
     monkeypatch,
 ) -> None:
     result_path = tmp_path / "result.json"
+    runtime_check = _runtime_ready()
+    captured_runtime_check = None
 
     class FakeLock:
         def __init__(self, _: str) -> None:
@@ -330,8 +464,15 @@ def test_main_writes_bounded_result_for_runner_outcome(
             return False
 
     class FakeRunner:
-        def __init__(self, settings: dict) -> None:
+        def __init__(
+            self,
+            settings: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
+            nonlocal captured_runtime_check
             assert settings["mode"] == "update"
+            captured_runtime_check = jvlink_runtime_check
             self.spec_results = {
                 name: {"status": "success", "stable_error": None}
                 for name in quickstart.BOUNDED_UPDATE_SPEC_NAMES
@@ -344,8 +485,8 @@ def test_main_writes_bounded_result_for_runner_outcome(
     monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
     monkeypatch.setattr(
         quickstart,
-        "_check_service_key",
-        lambda: (True, "fixture"),
+        "_check_jvlink_runtime",
+        lambda *_: runtime_check,
     )
     monkeypatch.setattr(
         quickstart.sys,
@@ -368,6 +509,7 @@ def test_main_writes_bounded_result_for_runner_outcome(
         quickstart.main()
 
     assert exc_info.value.code == 0
+    assert captured_runtime_check is runtime_check
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["exit_code"] == 0
     assert all(
@@ -394,7 +536,12 @@ def test_main_accepts_and_propagates_download_timeouts(
             return False
 
     class FakeRunner:
-        def __init__(self, settings: dict) -> None:
+        def __init__(
+            self,
+            settings: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             captured_settings.update(settings)
             self.spec_results = {
                 name: {"status": "nodata", "stable_error": None}
@@ -406,7 +553,11 @@ def test_main_accepts_and_propagates_download_timeouts(
 
     monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
     monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
-    monkeypatch.setattr(quickstart, "_check_service_key", lambda *_: (True, "fixture"))
+    monkeypatch.setattr(
+        quickstart,
+        "_check_jvlink_runtime",
+        lambda *_: _runtime_ready(),
+    )
     monkeypatch.setattr(
         quickstart.sys,
         "argv",
@@ -471,7 +622,12 @@ def test_main_propagates_bounded_race_selection(
             return False
 
     class FakeRunner:
-        def __init__(self, settings: dict) -> None:
+        def __init__(
+            self,
+            settings: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             captured_settings.update(settings)
             self.spec_results = {
                 "RACE": {"status": "nodata", "stable_error": None}
@@ -482,7 +638,11 @@ def test_main_propagates_bounded_race_selection(
 
     monkeypatch.setattr(quickstart, "ProcessLock", FakeLock)
     monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
-    monkeypatch.setattr(quickstart, "_check_service_key", lambda *_: (True, "fixture"))
+    monkeypatch.setattr(
+        quickstart,
+        "_check_jvlink_runtime",
+        lambda *_: _runtime_ready(),
+    )
     monkeypatch.setattr(
         quickstart.sys,
         "argv",
@@ -528,7 +688,12 @@ def test_main_rejects_diagnostic_trace_outside_bounded_race(
     runner_started = False
 
     class FakeRunner:
-        def __init__(self, _: dict) -> None:
+        def __init__(
+            self,
+            _: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             nonlocal runner_started
             runner_started = True
 
@@ -561,7 +726,12 @@ def test_main_rejects_bounded_race_without_exact_jvstatus_retry_limit(
     runner_started = False
 
     class FakeRunner:
-        def __init__(self, _: dict) -> None:
+        def __init__(
+            self,
+            _: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             nonlocal runner_started
             runner_started = True
 
@@ -604,7 +774,12 @@ def test_main_rejects_invalid_download_timeouts_before_runner(
     runner_started = False
 
     class FakeRunner:
-        def __init__(self, _: dict) -> None:
+        def __init__(
+            self,
+            _: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             nonlocal runner_started
             runner_started = True
 
@@ -648,7 +823,12 @@ def test_main_writes_bounded_result_when_runner_raises(
             return False
 
     class FakeRunner:
-        def __init__(self, _: dict) -> None:
+        def __init__(
+            self,
+            _: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             self.spec_results = {
                 "TOKU": {
                     "status": "failed",
@@ -663,8 +843,8 @@ def test_main_writes_bounded_result_when_runner_raises(
     monkeypatch.setattr(quickstart, "QuickstartRunner", FakeRunner)
     monkeypatch.setattr(
         quickstart,
-        "_check_service_key",
-        lambda: (True, "fixture"),
+        "_check_jvlink_runtime",
+        lambda *_: _runtime_ready(),
     )
     monkeypatch.setattr(
         quickstart.sys,
@@ -704,7 +884,12 @@ def test_main_refuses_existing_result_before_runner(
     runner_started = False
 
     class FakeRunner:
-        def __init__(self, _: dict) -> None:
+        def __init__(
+            self,
+            _: dict,
+            *,
+            jvlink_runtime_check: quickstart.JVLinkRuntimeCheck | None = None,
+        ) -> None:
             nonlocal runner_started
             runner_started = True
 

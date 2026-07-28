@@ -128,7 +128,9 @@ def test_bounded_preflight_starts_trace_that_the_wrapper_resumes(
     _install_com_modules(monkeypatch, com)
     trace_path = tmp_path / "preflight-and-open.json"
 
-    assert quickstart._check_jvlink_service_key(str(trace_path)) == (True, "JV-Link認証OK")
+    runtime_check = quickstart._check_jvlink_runtime(str(trace_path))
+    assert runtime_check.ok is True
+    assert runtime_check.stable_error is None
     wrapper = JVLinkWrapper(
         "JLTSQL",
         diagnostic_trace_path=trace_path,

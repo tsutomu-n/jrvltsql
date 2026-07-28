@@ -15,9 +15,11 @@ import json
 import os
 import re
 import subprocess
+import struct
 import sys
 import time
 import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -82,7 +84,7 @@ else:
     console = None
 
 
-def interactive_setup() -> dict:
+def interactive_setup() -> tuple[dict, "JVLinkRuntimeCheck"]:
     """対話形式で設定を収集"""
     if RICH_AVAILABLE:
         return _interactive_setup_rich()
@@ -98,17 +100,15 @@ BOUNDED_BUILD_RESULT_SCHEMA_VERSION = "jvdata_bounded_build_result_v1"
 BOUNDED_UPDATE_SPEC_NAMES = ("TOKU", "RACE", "DIFN", "MING", "TCVN", "RCVN")
 
 
-def _service_precheck_stable_error(message: str) -> str:
-    """Classify a failure that occurs before any bounded spec can run."""
+@dataclass(frozen=True)
+class JVLinkRuntimeCheck:
+    """Sanitized result of the setup-time JV-Link COM runtime check."""
 
-    normalized = message.lower()
-    if "64-bit python" in normalized and "32-bit" in normalized:
-        return "jvlink_runtime_incompatible"
-    if "pywin32" in normalized:
-        return "jvlink_pywin32_missing"
-    if "jvinit" in normalized:
-        return "jvlink_initialization_failed"
-    return "jvlink_preflight_failed"
+    ok: bool
+    stage: str
+    stable_error: str | None
+    operator_message: str
+    runtime_bits: int
 
 
 def _write_bounded_build_result(
@@ -402,107 +402,76 @@ def _disable_auto_start() -> bool:
         return False
 
 
-def _check_jvlink_service_key(
+def _missing_com_module(exc: BaseException) -> str | None:
+    """Return an exact missing COM dependency from a wrapped exception."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ModuleNotFoundError) and current.name in {
+            "win32com",
+            "win32com.client",
+            "pythoncom",
+        }:
+            return current.name
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _check_jvlink_runtime(
     diagnostic_trace_path: str | None = None,
-) -> tuple[bool, str]:
-    """JV-Linkのサービスキー設定状況を実際にAPIで確認
+) -> JVLinkRuntimeCheck:
+    """Check COM construction and JVInit without claiming service authorization."""
 
-    Returns:
-        (is_valid, message): サービスキーが有効かどうかとメッセージ
-    """
-    import struct
-    is_64bit = struct.calcsize("P") * 8 == 64
-    
+    from src.jvlink.wrapper import JVLinkWrapper
+
+    runtime_bits = struct.calcsize("P") * 8
+    wrapper = None
+    stage = "com_bootstrap"
     try:
-        if diagnostic_trace_path is None:
-            import win32com.client
-            jvlink = win32com.client.Dispatch("JVDTLab.JVLink")
-            result = jvlink.JVInit("JLTSQL")
-        else:
-            from src.jvlink.wrapper import JVLinkError, JVLinkWrapper
-
-            wrapper = JVLinkWrapper(
-                "JLTSQL",
-                diagnostic_trace_path=diagnostic_trace_path,
+        wrapper = JVLinkWrapper(
+            "JLTSQL",
+            diagnostic_trace_path=diagnostic_trace_path,
+        )
+        stage = "jvinit"
+        wrapper.jv_init()
+        return JVLinkRuntimeCheck(
+            ok=True,
+            stage="jvinit",
+            stable_error=None,
+            operator_message=(
+                "JV-Link COM初期化OK"
+                "（利用キー・契約はJVOpen時に判定）"
+            ),
+            runtime_bits=runtime_bits,
+        )
+    except Exception as exc:
+        missing_module = _missing_com_module(exc)
+        if missing_module is not None:
+            stable_error = "jvlink_pywin32_missing"
+            operator_message = "pywin32/pythoncomを読み込めません"
+        elif stage == "jvinit":
+            stable_error = "jvlink_initialization_failed"
+            code = getattr(exc, "error_code", None)
+            operator_message = (
+                f"JV-Link COM初期化失敗 (JVInit code: {code})"
+                if isinstance(code, int)
+                else "JV-Link COM初期化失敗"
             )
-            try:
-                result = wrapper.jv_init()
-            except JVLinkError as exc:
-                if type(exc.error_code) is not int:
-                    raise
-                result = exc.error_code
-
-        # JVInitで認証チェック（sidは任意の文字列）
-        #
-        # JVInitの戻り値は公式仕様書「3. コード表」の JVInit セクションで
-        # -101/-102/-103 のみが定義されている（-100 はJVInitの戻り値ではなく
-        # JVSetUIProperties/JVSetServiceKey等の戻り値。src/jvlink/constants.py
-        # のJV_RT_INVALID_PARAMETER参照）。これらはいずれも sid パラメータの
-        # 形式不正を示すコードで、サービスキー(利用キー)自体の状態を示すもの
-        # ではない。サービスキー関連のエラー（未設定・無効・期限切れ等）は
-        # JVOpen/JVRTOpen が -301/-302/-303 として返す。
-        if result == 0:
-            return True, "JV-Link認証OK"
-        elif result == -101:
-            return False, "JVInit: sid パラメータが設定されていません（内部エラー）"
-        elif result == -102:
-            return False, "JVInit: sid パラメータが64byteを超えています（内部エラー）"
-        elif result == -103:
-            return False, "JVInit: sid パラメータが不正です（内部エラー）"
         else:
-            return False, f"JV-Link初期化エラー (code: {result})"
-    except Exception as e:
-        error_msg = str(e).lower()
-        # 64-bit Python + 32-bit DLL の問題を検出
-        if is_64bit and ("class not registered" in error_msg or 
-                         "クラスが登録されていません" in error_msg or
-                         "-2147221164" in error_msg):
-            return False, (
-                "JV-Link検出不可 (64-bit Python使用中)\n"
-                "    → JV-Linkは32-bit DLLのため、32-bit Pythonが必要です\n"
-                "    → py -3.12-32 でインストール: python.org から Windows installer (32-bit) をダウンロード"
-            )
-        elif "no module named 'win32com'" in error_msg:
-            return False, "pywin32未インストール: pip install pywin32"
-        else:
-            return False, f"JV-Link未インストールまたはアクセス不可: {e}"
-
-
-
-def _check_service_key_detailed() -> dict:
-    """JRAサービスキー確認（詳細版）
-
-    Returns:
-        dict with:
-            - all_valid: bool - 有効か
-            - jra_valid: bool - JRAが有効か
-            - jra_msg: str - JRAのメッセージ
-            - available_sources: list - 利用可能なソース ['jra']
-    """
-    result = {
-        'all_valid': False,
-        'jra_valid': False,
-        'jra_msg': '',
-        'available_sources': []
-    }
-
-    jra_valid, jra_msg = _check_jvlink_service_key()
-    result['jra_valid'] = jra_valid
-    result['jra_msg'] = jra_msg
-    result['all_valid'] = jra_valid
-    if jra_valid:
-        result['available_sources'] = ['jra']
-
-    return result
-
-
-def _check_service_key(diagnostic_trace_path: str | None = None) -> tuple[bool, str]:
-    """JRAサービスキー確認
-
-    Returns:
-        (is_valid, message): サービスキーが有効かどうかとメッセージ
-    """
-    return _check_jvlink_service_key(diagnostic_trace_path)
+            stable_error = "jvlink_com_unavailable"
+            operator_message = "JV-Link COMアクセス失敗"
+        return JVLinkRuntimeCheck(
+            ok=False,
+            stage=stage,
+            stable_error=stable_error,
+            operator_message=operator_message,
+            runtime_bits=runtime_bits,
+        )
+    finally:
+        if wrapper is not None:
+            wrapper.cleanup()
 
 
 # マスコット - シンプルな絵文字ベース
@@ -746,7 +715,7 @@ def _test_postgresql_connection(host: str, port: int, database: str, user: str, 
         return False, f"接続失敗: {error_msg}"
 
 
-def _interactive_setup_rich() -> dict:
+def _interactive_setup_rich() -> tuple[dict, JVLinkRuntimeCheck]:
     """Rich UIで対話形式設定"""
     console.clear()
     _print_header_rich()
@@ -904,26 +873,17 @@ def _interactive_setup_rich() -> dict:
 
     console.print()
 
-    # JV-Linkサービスキー確認
-    console.print("[bold]2. JV-Link サービスキー確認[/bold]")
+    # JV-Link COM runtime確認
+    console.print("[bold]2. JV-Link runtime確認[/bold]")
     console.print()
 
-    # 詳細チェックを実行
-    check_result = _check_service_key_detailed()
+    runtime_check = _check_jvlink_runtime()
 
-    if check_result['all_valid']:
-        console.print(f"  [green]OK[/green] {check_result['jra_msg']}")
+    if runtime_check.ok:
+        console.print(f"  [green]OK[/green] {runtime_check.operator_message}")
         console.print()
     else:
-        console.print(f"  [red]NG[/red] {check_result['jra_msg']}")
-        console.print()
-        console.print("[yellow]JRA-VAN DataLabソフトウェアでサービスキーを設定してください[/yellow]")
-        console.print("[dim]https://jra-van.jp/dlb/[/dim]")
-        try:
-            console.print("[dim]契約ページをブラウザで開いています...[/dim]")
-            webbrowser.open("https://jra-van.jp/dlb/")
-        except Exception:
-            pass
+        console.print(f"  [red]NG[/red] {runtime_check.operator_message}")
         console.print()
         console.print("[red]セットアップを中止します。[/red]")
         sys.exit(1)
@@ -1360,10 +1320,10 @@ def _interactive_setup_rich() -> dict:
         console.print("[yellow]キャンセルしました[/yellow]")
         sys.exit(0)
 
-    return settings
+    return settings, runtime_check
 
 
-def _interactive_setup_simple() -> dict:
+def _interactive_setup_simple() -> tuple[dict, JVLinkRuntimeCheck]:
     """シンプルな対話形式設定"""
     print("=" * 60)
     print("JLTSQL セットアップ")
@@ -1481,20 +1441,16 @@ def _interactive_setup_simple() -> dict:
 
     print()
 
-    # JV-Linkサービスキー確認
-    print("2. JV-Link サービスキー確認")
+    # JV-Link COM runtime確認
+    print("2. JV-Link runtime確認")
     print()
 
-    # 詳細チェックを実行
-    check_result = _check_service_key_detailed()
+    runtime_check = _check_jvlink_runtime()
 
-    if check_result['all_valid']:
-        print(f"  [OK] {check_result['jra_msg']}")
+    if runtime_check.ok:
+        print(f"  [OK] {runtime_check.operator_message}")
     else:
-        print(f"  [NG] {check_result['jra_msg']}")
-        print()
-        print("  JRA-VAN DataLabソフトウェアでサービスキーを設定してください")
-        print("  https://jra-van.jp/dlb/")
+        print(f"  [NG] {runtime_check.operator_message}")
         print()
         print("[NG] セットアップを中止します。")
         sys.exit(1)
@@ -1881,7 +1837,7 @@ def _interactive_setup_simple() -> dict:
         print("キャンセルしました")
         sys.exit(0)
 
-    return settings
+    return settings, runtime_check
 
 
 class QuickstartRunner:
@@ -1982,8 +1938,14 @@ class QuickstartRunner:
     # 全リアルタイムスペック（後方互換性のため残す）
     REALTIME_SPECS = SPEED_REPORT_SPECS + TIME_SERIES_SPECS
 
-    def __init__(self, settings: dict):
+    def __init__(
+        self,
+        settings: dict,
+        *,
+        jvlink_runtime_check: JVLinkRuntimeCheck | None = None,
+    ):
         self.settings = settings
+        self._jvlink_runtime_check = jvlink_runtime_check
         self.project_root = Path(__file__).parent.parent
         self.errors = []
         self.warnings = []
@@ -2141,13 +2103,16 @@ class QuickstartRunner:
             checks.append(("OS", f"{sys.platform} (要Windows)", False))
             has_error = True
 
-        # JV-Link
-        try:
-            import win32com.client
-            win32com.client.Dispatch("JVDTLab.JVLink")
-            checks.append(("JV-Link", "OK", True))
-        except Exception:
-            checks.append(("JV-Link", "未インストール", False))
+        # JV-Link COM runtime
+        runtime_check = self._get_jvlink_runtime_check()
+        checks.append(
+            (
+                "JV-Link runtime",
+                runtime_check.operator_message,
+                runtime_check.ok,
+            )
+        )
+        if not runtime_check.ok:
             has_error = True
 
         # 結果表示
@@ -2156,6 +2121,15 @@ class QuickstartRunner:
             console.print(f"  [{status}] {name}: {value}")
 
         return not has_error
+
+    def _get_jvlink_runtime_check(self) -> JVLinkRuntimeCheck:
+        """Return the injected runtime evidence or run the check once."""
+
+        if self._jvlink_runtime_check is None:
+            self._jvlink_runtime_check = _check_jvlink_runtime(
+                self.settings.get("jvlink_diagnostic_trace")
+            )
+        return self._jvlink_runtime_check
 
     def _get_specs_for_mode(self) -> list:
         """モードに応じたスペックリストを取得（蓄積系のみ）"""
@@ -2840,12 +2814,10 @@ class QuickstartRunner:
             print(f"  [NG] {sys.platform} (Windowsが必要)")
             has_error = True
 
-        try:
-            import win32com.client
-            win32com.client.Dispatch("JVDTLab.JVLink")
-            print("  [OK] JV-Link")
-        except Exception:
-            print("  [NG] JV-Link (未インストール)")
+        runtime_check = self._get_jvlink_runtime_check()
+        status = "[OK]" if runtime_check.ok else "[NG]"
+        print(f"  {status} JV-Link runtime: {runtime_check.operator_message}")
+        if not runtime_check.ok:
             has_error = True
 
         return not has_error
@@ -3779,7 +3751,7 @@ def main():
 
     if use_interactive:
         # 対話形式で設定を収集
-        settings = interactive_setup()
+        settings, runtime_check = interactive_setup()
     else:
         # コマンドライン引数から設定を構築
         settings = {}
@@ -3862,23 +3834,18 @@ def main():
         # データソース: JRA固定
         settings['data_source'] = 'jra'
 
-        # 非対話モードではサービスキーを自動チェック
-        if args.jvlink_diagnostic_trace:
-            is_valid, message = _check_service_key(args.jvlink_diagnostic_trace)
-        else:
-            is_valid, message = _check_service_key()
-        if not is_valid:
-            print(f"[NG] 中央競馬（JRA）サービス認証エラー: {message}")
-            print("JRA-VAN DataLabソフトウェアでサービスキーを設定してください")
+        # 非対話モードではJV-Link COM runtimeを一度だけ確認
+        runtime_check = _check_jvlink_runtime(args.jvlink_diagnostic_trace)
+        if not runtime_check.ok:
+            print(f"[NG] JV-Link runtime確認: {runtime_check.operator_message}")
             if args.result_json:
-                stable_error = _service_precheck_stable_error(message)
                 _write_bounded_build_result(
                     args.result_json,
                     exit_code=1,
                     spec_results={
                         name: {
                             "status": "not_run",
-                            "stable_error": stable_error,
+                            "stable_error": runtime_check.stable_error,
                         }
                         for name in BOUNDED_UPDATE_SPEC_NAMES
                     },
@@ -3890,7 +3857,10 @@ def main():
     exit_code = 1
     try:
         with ProcessLock("quickstart"):
-            runner = QuickstartRunner(settings)
+            runner = QuickstartRunner(
+                settings,
+                jvlink_runtime_check=runtime_check,
+            )
             exit_code = runner.run()
     except ProcessLockError as e:
         if RICH_AVAILABLE:
